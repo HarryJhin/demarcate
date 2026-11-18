@@ -88,9 +88,9 @@ impl ConnectionBackend for TokioPostgresBackend {
     }
 
     async fn begin(&self, definition: &TransactionDefinition) -> Result<Conn, PoolError> {
-        let client = self.pool.get().await?;
-        client.batch_execute(&begin_statement(definition)).await?;
-        Ok(Conn { client: Some(client), in_transaction: true })
+        let connection = Conn { client: Some(self.pool.get().await?), in_transaction: true };
+        connection.client().batch_execute(&begin_statement(definition)).await?;
+        Ok(connection)
     }
 
     fn in_transaction(connection: &Conn) -> bool {

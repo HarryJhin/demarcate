@@ -34,6 +34,14 @@ async fn begin(
     pool.begin_with(AssertSqlSafe(begin_statement(definition))).await
 }
 
+async fn commit(started: Transaction<'static, Postgres>) -> Result<(), sqlx::Error> {
+    started.commit().await
+}
+
+async fn rollback(started: Transaction<'static, Postgres>) -> Result<(), sqlx::Error> {
+    started.rollback().await
+}
+
 async fn execute(connection: &mut PgConnection, statement: &str) -> Result<(), sqlx::Error> {
     sqlx::query(AssertSqlSafe(statement.to_owned())).execute(connection).await.map(|_| ())
 }
@@ -66,6 +74,7 @@ sqlx_driver! {
     database: Postgres,
     pool: PgPool,
     connection: PgConnection,
+    transaction: Transaction<'static, Postgres>,
     backend: PgBackend,
     object: PgTransactionObject,
     driver: PgTransactionDriver,

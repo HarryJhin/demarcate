@@ -82,8 +82,8 @@ impl<B: ConnectionBackend> ConnectionDriver<B> {
         statement: String,
     ) -> Result<(), SavepointError<B::Error>> {
         synchronization::check_access().map_err(SavepointError::State)?;
-        holder.check_savepoint_owner().map_err(SavepointError::State)?;
         holder.check_not_ended().map_err(SavepointError::State)?;
+        holder.check_savepoint_owner().map_err(SavepointError::State)?;
         let mut guard = holder.lock().map_err(SavepointError::State)?;
         let connection = guard.as_mut().ok_or_else(|| {
             SavepointError::State(TransactionError::Usage(

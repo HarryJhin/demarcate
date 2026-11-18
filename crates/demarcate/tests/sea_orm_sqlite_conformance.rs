@@ -9,10 +9,13 @@ mod db {
 
     pub async fn connect(connections: u32) -> Raw {
         use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-        let path = std::env::temp_dir().join(format!("demarcate-sea-orm-{}-{connections}.db", std::process::id()));
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-        }
+        static CLEAN: std::sync::Once = std::sync::Once::new();
+        let path = std::env::temp_dir().join(format!("demarcate-sea-orm-{}.db", std::process::id()));
+        CLEAN.call_once(|| {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+            }
+        });
         let options = SqliteConnectOptions::new()
             .filename(&path)
             .create_if_missing(true)

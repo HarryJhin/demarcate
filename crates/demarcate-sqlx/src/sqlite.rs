@@ -23,6 +23,14 @@ async fn begin(
     pool.begin().await
 }
 
+async fn commit(started: Transaction<'static, Sqlite>) -> Result<(), sqlx::Error> {
+    started.commit().await
+}
+
+async fn rollback(started: Transaction<'static, Sqlite>) -> Result<(), sqlx::Error> {
+    started.rollback().await
+}
+
 async fn execute(connection: &mut SqliteConnection, statement: &str) -> Result<(), sqlx::Error> {
     connection.execute(AssertSqlSafe(statement.to_owned())).await.map(|_| ())
 }
@@ -51,6 +59,7 @@ sqlx_driver! {
     database: Sqlite,
     pool: SqlitePool,
     connection: SqliteConnection,
+    transaction: Transaction<'static, Sqlite>,
     backend: SqliteBackend,
     object: SqliteTransactionObject,
     driver: SqliteTransactionDriver,

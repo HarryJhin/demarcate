@@ -76,6 +76,10 @@ jobs:
           cargo check -p demarcate-sea-orm
           cargo check -p demarcate-tokio-postgres
           cargo check -p demarcate
+          cargo check -p demarcate --features sqlx-postgres
+          cargo check -p demarcate --features sqlx-sqlite
+          cargo check -p demarcate --features tokio-postgres
+          cargo check -p demarcate --features diesel-async-postgres
           cargo check -p demarcate --features sqlx-mysql
           cargo check -p demarcate --features sea-orm
           cargo check -p demarcate --features diesel-async-mysql

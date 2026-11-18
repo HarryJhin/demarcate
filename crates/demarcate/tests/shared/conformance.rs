@@ -3,6 +3,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -235,6 +236,29 @@ impl Service {
         self.insert(value).await?;
         assert!(self.nested(value, false).await.is_err(), "the nested insert violates the primary key");
         self.insert("z-after").await
+    }
+}
+
+// Polls a future a given number of times and then drops it: a call that is cancelled at that
+// point.
+struct PollLimit<F> {
+    future: Pin<Box<F>>,
+    left: usize,
+}
+
+impl<F: Future> Future for PollLimit<F> {
+    type Output = Option<F::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.left == 0 {
+            return Poll::Ready(None);
+        }
+        self.left -= 1;
+        match self.future.as_mut().poll(context) {
+            Poll::Ready(output) => Poll::Ready(Some(output)),
+            Poll::Pending if self.left == 0 => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -498,4 +522,67 @@ db_test!(the_settings_of_a_transaction_do_not_stay_on_its_connection, |service| 
     plain.execute(|_status| insert("in-the-next-transaction")).await.unwrap();
     insert("without-a-transaction").await.unwrap();
     let _ = service;
+});
+
+db_test!(a_call_cancelled_at_any_point_leaves_its_connection_usable, |service| {
+    for restricted in [false, true] {
+        let mut completed = false;
+        for polls in 1..=100 {
+            db::raw_execute(&service.raw, &format!("delete from {TABLE}")).await;
+            let raw = db::connect(1).await;
+            let pool = db::transactional(&raw);
+            let manager: Arc<dyn demarcate::PlatformTransactionManager> = Arc::new(db::manager(pool.clone()));
+            let definition = if restricted {
+                TransactionDefinition::new()
+                    .isolation(Isolation::Serializable)
+                    .read_only(true)
+                    .timeout(Duration::from_secs(30))
+            } else {
+                TransactionDefinition::new()
+            };
+            let template = TransactionTemplate::with_definition(manager.clone(), definition);
+            let call = {
+                let pool = pool.clone();
+                template.execute(move |_status| async move {
+                    if restricted {
+                        db::values(&pool, TABLE).await.map(|_| ()).map_err(ServiceError::Sql)
+                    } else {
+                        db::insert(&pool, TABLE, "in-the-call").await.map_err(ServiceError::Sql)
+                    }
+                })
+            };
+            let outcome = PollLimit { future: Box::pin(call), left: polls }.await;
+            let case = format!("restricted={restricted}, dropped after {polls} polls, finished={}", outcome.is_some());
+
+            // The pool has one connection. If the cancelled call left a transaction or a read-only
+            // setting on it, the insert below fails or stays invisible to the other connections.
+            tokio::time::timeout(Duration::from_secs(20), db::insert(&pool, TABLE, "without-a-transaction"))
+                .await
+                .unwrap_or_else(|_| panic!("no connection for the next statement: {case}"))
+                .unwrap_or_else(|error| panic!("{error}: {case}"));
+            assert!(
+                service.committed().await.contains(&"without-a-transaction".to_owned()),
+                "a statement without a transaction must commit at once: {case}"
+            );
+
+            let plain = TransactionTemplate::new(manager);
+            let next = {
+                let pool = pool.clone();
+                plain.execute(move |_status| async move {
+                    db::insert(&pool, TABLE, "in-the-next-transaction").await.map_err(ServiceError::Sql)
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(20), next)
+                .await
+                .unwrap_or_else(|_| panic!("no connection for the next transaction: {case}"))
+                .unwrap_or_else(|error| panic!("{error:?}: {case}"));
+            assert!(service.committed().await.contains(&"in-the-next-transaction".to_owned()), "{case}");
+
+            if outcome.is_some() {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "the call did not finish within 100 polls");
+    }
 });

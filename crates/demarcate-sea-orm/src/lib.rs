@@ -43,6 +43,11 @@ impl Conn {
 /// The isolation level and the read-only flag are passed to SeaORM when the transaction begins.
 /// On SQLite only `Isolation::Default` and `Isolation::Serializable` are accepted, and the
 /// read-only flag is not enforced.
+///
+/// On a Tokio runtime the transaction begins in a task of its own, and on MySQL and MariaDB every
+/// statement runs in a task of its own. A call that is cancelled therefore cannot leave an open
+/// transaction or a half-read statement on a pooled connection. Note that on another runtime this
+/// protection is missing for MySQL and MariaDB.
 pub struct SeaOrmBackend {
     connection: DatabaseConnection,
 }
@@ -86,9 +91,8 @@ impl ConnectionBackend for SeaOrmBackend {
     }
 
     async fn begin(&self, definition: &TransactionDefinition) -> Result<Conn, DbErr> {
-        if self.connection.get_database_backend() == DbBackend::Sqlite {
-            return Ok(Conn::Transaction(self.connection.begin().await?));
-        }
+        let connection = self.connection.clone();
+        let sqlite = connection.get_database_backend() == DbBackend::Sqlite;
         let isolation = match definition.isolation {
             Isolation::Default => None,
             Isolation::ReadUncommitted => Some(IsolationLevel::ReadUncommitted),
@@ -97,7 +101,20 @@ impl ConnectionBackend for SeaOrmBackend {
             Isolation::Serializable => Some(IsolationLevel::Serializable),
         };
         let access = definition.read_only.then_some(AccessMode::ReadOnly);
-        Ok(Conn::Transaction(self.connection.begin_with_config(isolation, access).await?))
+        let begin = async move {
+            if sqlite { connection.begin().await } else { connection.begin_with_config(isolation, access).await }
+        };
+        // A begin that is cancelled half-way can leave the transaction open on a pooled
+        // connection. In a task of its own the begin always runs to its end; when the caller is
+        // gone, the transaction is dropped there and rolled back.
+        let transaction = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => runtime
+                .spawn(begin)
+                .await
+                .map_err(|error| DbErr::Custom(format!("The task that began the transaction failed: {error}")))??,
+            Err(_) => begin.await?,
+        };
+        Ok(Conn::Transaction(transaction))
     }
 
     fn in_transaction(connection: &Conn) -> bool {
@@ -140,7 +157,10 @@ impl ConnectionBackend for SeaOrmBackend {
 
     fn ends_transaction(&self, error: &DbErr) -> bool {
         self.connection.get_database_backend() == DbBackend::MySql
-            && sqlstate(error).is_some_and(|code| code == "40001")
+            && (sqlstate(error).is_some_and(|code| code == "40001")
+                || database_error(error)
+                    .and_then(|error| error.as_database_error())
+                    .is_some_and(|database| database.message().contains("Record has changed since last read")))
     }
 
     async fn is_usable(&self, connection: &mut Conn) -> bool {
@@ -191,6 +211,9 @@ pub type ConnectionHolder = demarcate_connection::ConnectionHolder<SeaOrmBackend
 /// An error of the transaction infrastructure raised during a query arrives as
 /// `DbErr::Conn(RuntimeErr::SqlxError(_))` that holds a `sqlx::Error::Configuration` with the
 /// [`TransactionError`]; [`transaction_error`] returns it.
+///
+/// This type implements [`ConnectionTrait`] only. It does not implement SeaORM's `StreamTrait`
+/// and `TransactionTrait`, so `stream` and `transaction` cannot be called on it.
 ///
 /// Do not begin a transaction on the wrapped connection with SeaORM's own `begin` or
 /// `transaction` inside a transactional function: that transaction is a separate one.
@@ -256,9 +279,64 @@ impl TransactionalDatabase {
         self.source.is_connection_transactional()
     }
 
-    async fn acquire(&self) -> Result<ConnectionHandle<SeaOrmBackend>, DbErr> {
-        self.source.acquire().await.map_err(into_db_err)
+    async fn run(&self, operation: Operation) -> Result<Output, DbErr> {
+        let connection = self.source.acquire().await.map_err(into_db_err)?;
+        // sqlx cannot use a MySQL connection again when a statement on it was cancelled half-way.
+        // In a task of its own the statement always runs to its end, also when the caller is gone.
+        if self.backend == DbBackend::MySql
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            return runtime
+                .spawn(operation.run(connection))
+                .await
+                .map_err(|error| DbErr::Custom(format!("The task that ran the statement failed: {error}")))?;
+        }
+        operation.run(connection).await
     }
+}
+
+enum Operation {
+    Execute(Statement),
+    ExecuteUnprepared(String),
+    QueryOne(Statement),
+    QueryAll(Statement),
+}
+
+enum Output {
+    Executed(ExecResult),
+    One(Option<QueryResult>),
+    All(Vec<QueryResult>),
+}
+
+impl Operation {
+    async fn run(self, connection: ConnectionHandle<SeaOrmBackend>) -> Result<Output, DbErr> {
+        let result = match (&*connection, self) {
+            (Conn::Plain(plain), Self::Execute(statement)) => plain.execute_raw(statement).await.map(Output::Executed),
+            (Conn::Plain(plain), Self::ExecuteUnprepared(sql)) => {
+                plain.execute_unprepared(&sql).await.map(Output::Executed)
+            }
+            (Conn::Plain(plain), Self::QueryOne(statement)) => plain.query_one_raw(statement).await.map(Output::One),
+            (Conn::Plain(plain), Self::QueryAll(statement)) => plain.query_all_raw(statement).await.map(Output::All),
+            (Conn::Transaction(transaction), Self::Execute(statement)) => {
+                transaction.execute_raw(statement).await.map(Output::Executed)
+            }
+            (Conn::Transaction(transaction), Self::ExecuteUnprepared(sql)) => {
+                transaction.execute_unprepared(&sql).await.map(Output::Executed)
+            }
+            (Conn::Transaction(transaction), Self::QueryOne(statement)) => {
+                transaction.query_one_raw(statement).await.map(Output::One)
+            }
+            (Conn::Transaction(transaction), Self::QueryAll(statement)) => {
+                transaction.query_all_raw(statement).await.map(Output::All)
+            }
+        };
+        connection.statement_finished(result.as_ref().err());
+        result
+    }
+}
+
+fn unexpected_output() -> DbErr {
+    DbErr::Custom("The statement returned a result of another kind".into())
 }
 
 #[async_trait::async_trait]
@@ -268,40 +346,31 @@ impl ConnectionTrait for TransactionalDatabase {
     }
 
     async fn execute_raw(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
-        let connection = self.acquire().await?;
-        let result = match &*connection {
-            Conn::Plain(plain) => plain.execute_raw(stmt).await,
-            Conn::Transaction(transaction) => transaction.execute_raw(stmt).await,
-        };
-        connection.statement_finished(result.as_ref().err());
-        result
+        match self.run(Operation::Execute(stmt)).await? {
+            Output::Executed(result) => Ok(result),
+            _ => Err(unexpected_output()),
+        }
     }
 
     async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
-        let connection = self.acquire().await?;
-        let result = connection.execute_unprepared(sql).await;
-        connection.statement_finished(result.as_ref().err());
-        result
+        match self.run(Operation::ExecuteUnprepared(sql.to_owned())).await? {
+            Output::Executed(result) => Ok(result),
+            _ => Err(unexpected_output()),
+        }
     }
 
     async fn query_one_raw(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
-        let connection = self.acquire().await?;
-        let result = match &*connection {
-            Conn::Plain(plain) => plain.query_one_raw(stmt).await,
-            Conn::Transaction(transaction) => transaction.query_one_raw(stmt).await,
-        };
-        connection.statement_finished(result.as_ref().err());
-        result
+        match self.run(Operation::QueryOne(stmt)).await? {
+            Output::One(result) => Ok(result),
+            _ => Err(unexpected_output()),
+        }
     }
 
     async fn query_all_raw(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
-        let connection = self.acquire().await?;
-        let result = match &*connection {
-            Conn::Plain(plain) => plain.query_all_raw(stmt).await,
-            Conn::Transaction(transaction) => transaction.query_all_raw(stmt).await,
-        };
-        connection.statement_finished(result.as_ref().err());
-        result
+        match self.run(Operation::QueryAll(stmt)).await? {
+            Output::All(result) => Ok(result),
+            _ => Err(unexpected_output()),
+        }
     }
 
     fn support_returning(&self) -> bool {

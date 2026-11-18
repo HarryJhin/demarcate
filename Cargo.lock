@@ -441,6 +441,7 @@ dependencies = [
  "demarcate-connection",
  "demarcate-core",
  "sea-orm",
+ "tokio",
 ]
 
 [[package]]

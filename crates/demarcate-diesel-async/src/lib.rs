@@ -144,7 +144,8 @@ macro_rules! diesel_driver {
             }
 
             async fn begin(&self, definition: &TransactionDefinition) -> Result<Conn, Error> {
-                let mut connection = self.pool.get().await?;
+                let mut started = Conn { connection: Some(self.pool.get().await?), in_transaction: true };
+                let connection = started.connection();
                 let isolation = isolation_clause(definition.isolation);
                 let statement = match KIND {
                     Kind::Postgres => {
@@ -165,8 +166,8 @@ macro_rules! diesel_driver {
                         String::from(if definition.read_only { "START TRANSACTION READ ONLY" } else { "START TRANSACTION" })
                     }
                 };
-                AnsiTransactionManager::begin_transaction_sql::<$connection>(&mut *connection, &statement).await?;
-                Ok(Conn { connection: Some(connection), in_transaction: true })
+                AnsiTransactionManager::begin_transaction_sql::<$connection>(connection, &statement).await?;
+                Ok(started)
             }
 
             fn in_transaction(connection: &Conn) -> bool {
@@ -207,7 +208,8 @@ macro_rules! diesel_driver {
             fn ends_transaction(&self, error: &Error) -> bool {
                 KIND == Kind::Mysql
                     && matches!(error, Error::Query(diesel::result::Error::DatabaseError(_, information))
-                        if information.message().contains("Deadlock found"))
+                        if information.message().contains("Deadlock found")
+                            || information.message().contains("Record has changed since last read"))
             }
 
             async fn is_usable(&self, connection: &mut Conn) -> bool {
@@ -244,9 +246,10 @@ macro_rules! diesel_driver {
         /// PostgreSQL the commit therefore asks the server whether the transaction is usable and returns
         /// [`TransactionError::UnexpectedRollback`] if a failed statement has aborted it.
         ///
-        /// Note that on MySQL and MariaDB a deadlock (SQLSTATE `40001`) ends the transaction on the
-        /// server and leaves the connection in autocommit mode. This is not detected: return the error
-        /// of the statement from the transactional function.
+        /// Note that on MySQL and MariaDB a deadlock (SQLSTATE `40001`), and on MariaDB error 1020
+        /// "Record has changed since last read", ends the transaction on the server and leaves the
+        /// connection in autocommit mode. This is not detected, and the statements that follow run
+        /// outside the transaction: return the error of the statement from the transactional function.
         ///
         /// Cloning is cheap; clones share the pool and the transaction.
         pub struct TransactionalPool {

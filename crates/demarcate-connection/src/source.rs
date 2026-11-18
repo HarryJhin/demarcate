@@ -139,8 +139,8 @@ impl<B: ConnectionBackend> ConnectionSource<B> {
         synchronization::check_access()?;
         let synchronized = synchronization::is_synchronization_active();
         if let Some(holder) = self.bound_holder() {
-            holder.check_savepoint_owner()?;
             holder.check_not_ended()?;
+            holder.check_savepoint_owner()?;
             let mut guard = match holder.lock() {
                 Ok(guard) => guard,
                 Err(_) if !holder.is_transaction_active() => {

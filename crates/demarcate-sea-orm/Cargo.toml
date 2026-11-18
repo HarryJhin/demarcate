@@ -14,4 +14,5 @@ categories = ["database", "asynchronous"]
 demarcate-connection = { path = "../demarcate-connection", version = "0.1.0" }
 demarcate-core = { path = "../demarcate-core", version = "0.1.0", default-features = false }
 async-trait = "0.1.80"
+tokio = { workspace = true }
 sea-orm = { version = "2.0.4", default-features = false, features = ["sqlx-dep"] }

@@ -3,6 +3,7 @@ macro_rules! sqlx_driver {
         database: $database:ty,
         pool: $pool:ty,
         connection: $connection:ty,
+        transaction: $transaction:ty,
         backend: $backend:ident,
         object: $object:ident,
         driver: $driver:ident,
@@ -18,7 +19,7 @@ macro_rules! sqlx_driver {
         #[doc(hidden)]
         pub enum Conn {
             Pooled(sqlx::pool::PoolConnection<$database>),
-            Transaction(sqlx::Transaction<'static, $database>),
+            Transaction($transaction),
         }
 
         impl Conn {
@@ -72,14 +73,14 @@ macro_rules! sqlx_driver {
 
             async fn commit(&self, connection: Conn) -> Result<(), sqlx::Error> {
                 match connection {
-                    Conn::Transaction(started) => started.commit().await,
+                    Conn::Transaction(started) => commit(started).await,
                     Conn::Pooled(_) => Ok(()),
                 }
             }
 
             async fn rollback(&self, connection: Conn) -> Result<(), sqlx::Error> {
                 match connection {
-                    Conn::Transaction(started) => started.rollback().await,
+                    Conn::Transaction(started) => rollback(started).await,
                     Conn::Pooled(_) => Ok(()),
                 }
             }
