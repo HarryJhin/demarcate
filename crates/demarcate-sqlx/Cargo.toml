@@ -21,8 +21,8 @@ postgres = [
     "dep:tokio",
     "dep:tracing",
     "sqlx/postgres",
+    "sqlx/macros",
 ]
-macros = ["postgres", "sqlx/macros"]
 
 [dependencies]
 demarcate-core = { path = "../demarcate-core", version = "0.1.0", optional = true }

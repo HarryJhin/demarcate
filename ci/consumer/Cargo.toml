@@ -1,0 +1,15 @@
+[package]
+name = "demarcate-consumer-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+sqlx-default = ["sqlx/default"]
+
+[dependencies]
+demarcate = { path = "../../crates/demarcate", features = ["sqlx-postgres"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

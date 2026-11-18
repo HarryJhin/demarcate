@@ -316,7 +316,6 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
         })
     }
 
-    #[cfg(feature = "macros")]
     fn describe<'e>(
         self,
         sql: sqlx::SqlStr,
