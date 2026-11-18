@@ -134,6 +134,7 @@ fn wrap(attribute: &TokenStream2, owner: Option<&Type>, sig: &Signature, block: 
         None => quote! { ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)) },
     };
     let check = match &sig.output {
+        syn::ReturnType::Type(_, ty) if quote!(#ty).to_string().contains("impl ") => quote! {},
         syn::ReturnType::Type(_, ty) => {
             quote_spanned! { ty.span() => ::demarcate::assert_transactional_return::<#ty>(); }
         }
@@ -163,21 +164,44 @@ fn not_async(sig: &Signature) -> TokenStream {
     .into()
 }
 
+fn returns_future(sig: &Signature) -> bool {
+    match &sig.output {
+        syn::ReturnType::Type(_, ty) => quote!(#ty).to_string().contains("Future"),
+        syn::ReturnType::Default => false,
+    }
+}
+
 fn has_transactional_attribute(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| attr.path().segments.last().is_some_and(|segment| segment.ident == "transactional"))
 }
 
 fn transactional_impl(attribute: &TokenStream2, mut item: ItemImpl) -> TokenStream {
     let owner = (*item.self_ty).clone();
+    let mut errors = Vec::new();
     for member in &mut item.items {
         let ImplItem::Fn(method) = member else { continue };
-        if method.sig.asyncness.is_none() || has_transactional_attribute(&method.attrs) {
+        if has_transactional_attribute(&method.attrs) {
+            continue;
+        }
+        if method.sig.asyncness.is_none() {
+            if returns_future(&method.sig) {
+                errors.push(
+                    syn::Error::new_spanned(
+                        &method.sig,
+                        "#[transactional] on an `impl` block cannot make this method transactional because it \
+                         is not an `async fn` but returns a future. If #[async_trait] rewrote it, put \
+                         #[transactional] above #[async_trait]. Otherwise write it as an `async fn`, or move it \
+                         to an `impl` block without #[transactional]",
+                    )
+                    .to_compile_error(),
+                );
+            }
             continue;
         }
         let wrapped = wrap(attribute, Some(&owner), &method.sig, &method.block);
         method.block = syn::parse2(wrapped).expect("generated block");
     }
-    quote! { #item }.into()
+    quote! { #item #(#errors)* }.into()
 }
 
 #[proc_macro_attribute]
