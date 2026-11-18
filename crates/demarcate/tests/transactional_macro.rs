@@ -173,6 +173,8 @@ async fn read_only_forms() {
 
 struct Ledger;
 
+type Fallible<T> = Result<T, AppError>;
+
 #[transactional(transaction_manager = "macro-impl", read_only)]
 impl Ledger {
     pub async fn balance(&self) -> Result<u32, AppError> {
@@ -193,6 +195,11 @@ impl Ledger {
         Ok(demarcate::current_transaction_info().is_some())
     }
 
+    async fn aliased(&self) -> Fallible<bool> {
+        Ok(demarcate::current_transaction_info().is_some())
+    }
+
+    #[transactional(skip)]
     pub async fn describe(&self) -> String {
         "ledger".to_owned()
     }
@@ -225,7 +232,10 @@ async fn type_level_declaration_applies_to_public_async_methods() {
     assert!(!ledger.outside().await.unwrap(), "skip keeps a method outside the declaration");
     assert_eq!(ledger.describe().await, "ledger");
     assert_eq!(ledger.name(), "ledger");
-    assert_eq!(tm.counts(), [3, 3, 0], "skipped, non-Result and non-async methods are not transactional");
+    assert_eq!(tm.counts(), [3, 3, 0], "skipped and non-async methods are not transactional");
+
+    assert!(ledger.aliased().await.unwrap(), "a Result behind a type alias is transactional");
+    assert_eq!(tm.counts(), [4, 4, 0]);
 }
 
 #[transactional(transaction_manager = "macro-precedence", rollback_for = [AppError], no_rollback_if = is_warning)]

@@ -1,7 +1,8 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{quote, quote_spanned};
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::{
     Block, Expr, Ident, ImplItem, Item, ItemFn, ItemImpl, LitBool, LitInt, LitStr, Signature, Token, Type, bracketed,
     parse_macro_input,
@@ -134,8 +135,17 @@ fn wrap(attribute: &TokenStream2, owner: Option<&Type>, sig: &Signature, block: 
         },
         None => quote! { ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)) },
     };
+    let check = match &sig.output {
+        syn::ReturnType::Type(_, ty) => {
+            quote_spanned! { ty.span() => ::demarcate::assert_transactional_return::<#ty>(); }
+        }
+        syn::ReturnType::Default => {
+            quote_spanned! { sig.ident.span() => ::demarcate::assert_transactional_return::<()>(); }
+        }
+    };
     quote! {
         {
+            #check
             ::demarcate::invoke_within_transaction(
                 #attribute,
                 #identification,
@@ -155,12 +165,6 @@ fn not_async(sig: &Signature) -> TokenStream {
     .into()
 }
 
-fn returns_result(sig: &Signature) -> bool {
-    let syn::ReturnType::Type(_, ty) = &sig.output else { return false };
-    let syn::Type::Path(path) = ty.as_ref() else { return false };
-    path.path.segments.last().is_some_and(|segment| segment.ident.to_string().ends_with("Result"))
-}
-
 fn has_transactional_attribute(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| attr.path().segments.last().is_some_and(|segment| segment.ident == "transactional"))
 }
@@ -170,9 +174,6 @@ fn transactional_impl(attribute: &TokenStream2, mut item: ItemImpl) -> TokenStre
     for member in &mut item.items {
         let ImplItem::Fn(method) = member else { continue };
         if method.sig.asyncness.is_none() || has_transactional_attribute(&method.attrs) {
-            continue;
-        }
-        if !returns_result(&method.sig) {
             continue;
         }
         let wrapped = wrap(attribute, Some(&owner), &method.sig, &method.block);

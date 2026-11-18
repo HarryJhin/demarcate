@@ -4,6 +4,8 @@ pub use demarcate_interceptor::{
     current_transaction_info, current_transaction_status, error_chain_contains, invoke_with_manager,
     invoke_within_transaction, registry,
 };
+#[doc(hidden)]
+pub use demarcate_interceptor::{TransactionalReturn, assert_transactional_return};
 pub use demarcate_macros::transactional;
 
 #[cfg(feature = "sqlx-postgres")]
