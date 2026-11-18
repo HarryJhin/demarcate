@@ -1,11 +1,11 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::definition::{DefaultTransactionDefinition, TransactionDefinition};
+use crate::definition::TransactionDefinition;
 use crate::error::TransactionError;
 use crate::manager::PlatformTransactionManager;
 use crate::status::TransactionStatus;
-use crate::synchronization::TransactionSynchronizationManager;
+use crate::synchronization;
 
 #[derive(Debug)]
 pub enum TemplateError<E> {
@@ -28,26 +28,26 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for TemplateError<E> {}
 
 pub struct TransactionTemplate {
     transaction_manager: Arc<dyn PlatformTransactionManager>,
-    definition: DefaultTransactionDefinition,
+    definition: TransactionDefinition,
 }
 
 impl TransactionTemplate {
     pub fn new(transaction_manager: Arc<dyn PlatformTransactionManager>) -> Self {
-        Self { transaction_manager, definition: DefaultTransactionDefinition::new() }
+        Self { transaction_manager, definition: TransactionDefinition::new() }
     }
 
     pub fn with_definition(
         transaction_manager: Arc<dyn PlatformTransactionManager>,
-        definition: &dyn TransactionDefinition,
+        definition: TransactionDefinition,
     ) -> Self {
-        Self { transaction_manager, definition: DefaultTransactionDefinition::from_definition(definition) }
+        Self { transaction_manager, definition }
     }
 
-    pub fn definition(&self) -> &DefaultTransactionDefinition {
+    pub fn definition(&self) -> &TransactionDefinition {
         &self.definition
     }
 
-    pub fn definition_mut(&mut self) -> &mut DefaultTransactionDefinition {
+    pub fn definition_mut(&mut self) -> &mut TransactionDefinition {
         &mut self.definition
     }
 
@@ -60,10 +60,10 @@ impl TransactionTemplate {
         F: FnOnce(Arc<dyn TransactionStatus>) -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        TransactionSynchronizationManager::ensure_scope(async {
+        synchronization::ensure_scope(async {
             let status = self
                 .transaction_manager
-                .get_transaction(Some(&self.definition))
+                .transaction(Some(&self.definition))
                 .await
                 .map_err(TemplateError::Transaction)?;
             match action(status.clone()).await {

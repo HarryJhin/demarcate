@@ -115,193 +115,189 @@ fn read<R>(default: R, f: impl FnOnce(&State) -> R) -> R {
 fn write<R>(f: impl FnOnce(&mut State) -> Result<R, TransactionError>) -> Result<R, TransactionError> {
     STATE
         .try_with(|state| f(&mut state.borrow_mut()))
-        .unwrap_or_else(|_| Err(TransactionError::IllegalState("No transaction context bound to task".into())))
+        .unwrap_or_else(|_| Err(TransactionError::InvalidState("No transaction context bound to task".into())))
 }
 
-fn do_bind_resource(state: &mut State, key: ResourceKey, value: BoundResource) -> Option<BoundResource> {
+fn bind(state: &mut State, key: ResourceKey, value: BoundResource) -> Option<BoundResource> {
     state.resources.insert(key, value).filter(|old| !old.is_void())
 }
 
-fn do_unbind_resource(state: &mut State, key: &ResourceKey) -> Option<BoundResource> {
+fn unbind(state: &mut State, key: &ResourceKey) -> Option<BoundResource> {
     state.resources.remove(key).filter(|value| !value.is_void())
 }
 
-pub struct TransactionSynchronizationManager;
+pub fn is_context_active() -> bool {
+    STATE.try_with(|_| ()).is_ok()
+}
 
-impl TransactionSynchronizationManager {
-    pub fn is_context_active() -> bool {
-        STATE.try_with(|_| ()).is_ok()
-    }
+pub async fn scope<F: Future>(future: F) -> F::Output {
+    STATE.scope(RefCell::new(State::default()), future).await
+}
 
-    pub async fn scope<F: Future>(future: F) -> F::Output {
-        STATE.scope(RefCell::new(State::default()), future).await
-    }
+pub async fn ensure_scope<F: Future>(future: F) -> F::Output {
+    if is_context_active() { future.await } else { scope(future).await }
+}
 
-    pub async fn ensure_scope<F: Future>(future: F) -> F::Output {
-        if Self::is_context_active() { future.await } else { Self::scope(future).await }
-    }
+pub fn resource_keys() -> Vec<ResourceKey> {
+    read(Vec::new(), |state| state.resources.keys().cloned().collect())
+}
 
-    pub fn resource_keys() -> Vec<ResourceKey> {
-        read(Vec::new(), |state| state.resources.keys().cloned().collect())
-    }
+pub fn has_resource(key: &ResourceKey) -> bool {
+    resource(key).is_some()
+}
 
-    pub fn has_resource(key: &ResourceKey) -> bool {
-        Self::get_resource(key).is_some()
-    }
-
-    pub fn get_resource(key: &ResourceKey) -> Option<BoundResource> {
-        STATE
-            .try_with(|state| {
-                let mut state = state.borrow_mut();
-                let value = state.resources.get(key).cloned()?;
-                if value.is_void() {
-                    state.resources.remove(key);
-                    return None;
-                }
-                Some(value)
-            })
-            .ok()
-            .flatten()
-    }
-
-    pub fn bind_resource(key: ResourceKey, value: BoundResource) -> Result<(), TransactionError> {
-        write(|state| match do_bind_resource(state, key.clone(), value) {
-            Some(_) => Err(TransactionError::IllegalState(format!("Already value for key [{key:?}] bound to task"))),
-            None => Ok(()),
-        })
-    }
-
-    pub fn bind_synchronized_resource(key: ResourceKey, value: BoundResource) -> Result<(), TransactionError> {
-        write(|state| {
-            if state.synchronizations.is_none() {
-                return Err(TransactionError::IllegalState("Transaction synchronization is not active".into()));
+pub fn resource(key: &ResourceKey) -> Option<BoundResource> {
+    STATE
+        .try_with(|state| {
+            let mut state = state.borrow_mut();
+            let value = state.resources.get(key).cloned()?;
+            if value.is_void() {
+                state.resources.remove(key);
+                return None;
             }
-            let old_value = do_bind_resource(state, key.clone(), value.clone());
-            let synchronization: Arc<dyn TransactionSynchronization> =
-                Arc::new(SynchronizedResource { key, value, old_value });
-            state.synchronizations.as_mut().expect("checked above").push(synchronization);
-            Ok(())
+            Some(value)
         })
-    }
+        .ok()
+        .flatten()
+}
 
-    pub fn unbind_resource(key: &ResourceKey) -> Result<BoundResource, TransactionError> {
-        write(|state| {
-            do_unbind_resource(state, key)
-                .ok_or_else(|| TransactionError::IllegalState(format!("No value for key [{key:?}] bound to task")))
-        })
-    }
+pub fn bind_resource(key: ResourceKey, value: BoundResource) -> Result<(), TransactionError> {
+    write(|state| match bind(state, key.clone(), value) {
+        Some(_) => Err(TransactionError::InvalidState(format!("Already value for key [{key:?}] bound to task"))),
+        None => Ok(()),
+    })
+}
 
-    pub fn unbind_resource_if_possible(key: &ResourceKey) -> Option<BoundResource> {
-        write(|state| Ok(do_unbind_resource(state, key))).ok().flatten()
-    }
+pub fn bind_synchronized_resource(key: ResourceKey, value: BoundResource) -> Result<(), TransactionError> {
+    write(|state| {
+        if state.synchronizations.is_none() {
+            return Err(TransactionError::InvalidState("Transaction synchronization is not active".into()));
+        }
+        let old_value = bind(state, key.clone(), value.clone());
+        let synchronization: Arc<dyn TransactionSynchronization> =
+            Arc::new(SynchronizedResource { key, value, old_value });
+        state.synchronizations.as_mut().expect("checked above").push(synchronization);
+        Ok(())
+    })
+}
 
-    pub fn is_synchronization_active() -> bool {
-        read(false, |state| state.synchronizations.is_some())
-    }
+pub fn unbind_resource(key: &ResourceKey) -> Result<BoundResource, TransactionError> {
+    write(|state| {
+        unbind(state, key)
+            .ok_or_else(|| TransactionError::InvalidState(format!("No value for key [{key:?}] bound to task")))
+    })
+}
 
-    pub fn init_synchronization() -> Result<(), TransactionError> {
-        write(|state| {
-            if state.synchronizations.is_some() {
-                return Err(TransactionError::IllegalState(
-                    "Cannot activate transaction synchronization - already active".into(),
-                ));
-            }
-            state.synchronizations = Some(Vec::new());
-            Ok(())
-        })
-    }
+pub fn unbind_resource_if_possible(key: &ResourceKey) -> Option<BoundResource> {
+    write(|state| Ok(unbind(state, key))).ok().flatten()
+}
 
-    pub fn register_synchronization(
-        synchronization: Arc<dyn TransactionSynchronization>,
-    ) -> Result<(), TransactionError> {
-        write(|state| {
-            let synchronizations = state
-                .synchronizations
-                .as_mut()
-                .ok_or_else(|| TransactionError::IllegalState("Transaction synchronization is not active".into()))?;
-            if !synchronizations.iter().any(|existing| Arc::ptr_eq(existing, &synchronization)) {
-                synchronizations.push(synchronization);
-            }
-            Ok(())
-        })
-    }
+pub fn is_synchronization_active() -> bool {
+    read(false, |state| state.synchronizations.is_some())
+}
 
-    pub fn get_synchronizations() -> Result<Vec<Arc<dyn TransactionSynchronization>>, TransactionError> {
-        write(|state| {
-            let mut synchronizations = state
-                .synchronizations
-                .clone()
-                .ok_or_else(|| TransactionError::IllegalState("Transaction synchronization is not active".into()))?;
-            synchronizations.sort_by_key(|synchronization| synchronization.order());
-            Ok(synchronizations)
-        })
-    }
+pub fn init_synchronization() -> Result<(), TransactionError> {
+    write(|state| {
+        if state.synchronizations.is_some() {
+            return Err(TransactionError::InvalidState(
+                "Cannot activate transaction synchronization - already active".into(),
+            ));
+        }
+        state.synchronizations = Some(Vec::new());
+        Ok(())
+    })
+}
 
-    pub fn clear_synchronization() -> Result<(), TransactionError> {
-        write(|state| {
-            if state.synchronizations.take().is_none() {
-                return Err(TransactionError::IllegalState(
-                    "Cannot deactivate transaction synchronization - not active".into(),
-                ));
-            }
-            Ok(())
-        })
-    }
+pub fn register_synchronization(
+    synchronization: Arc<dyn TransactionSynchronization>,
+) -> Result<(), TransactionError> {
+    write(|state| {
+        let synchronizations = state
+            .synchronizations
+            .as_mut()
+            .ok_or_else(|| TransactionError::InvalidState("Transaction synchronization is not active".into()))?;
+        if !synchronizations.iter().any(|existing| Arc::ptr_eq(existing, &synchronization)) {
+            synchronizations.push(synchronization);
+        }
+        Ok(())
+    })
+}
 
-    pub fn set_current_transaction_name(name: Option<String>) {
-        let _ = write(|state| {
-            state.current_transaction_name = name;
-            Ok(())
-        });
-    }
+pub fn synchronizations() -> Result<Vec<Arc<dyn TransactionSynchronization>>, TransactionError> {
+    write(|state| {
+        let mut synchronizations = state
+            .synchronizations
+            .clone()
+            .ok_or_else(|| TransactionError::InvalidState("Transaction synchronization is not active".into()))?;
+        synchronizations.sort_by_key(|synchronization| synchronization.order());
+        Ok(synchronizations)
+    })
+}
 
-    pub fn current_transaction_name() -> Option<String> {
-        read(None, |state| state.current_transaction_name.clone())
-    }
+pub fn clear_synchronization() -> Result<(), TransactionError> {
+    write(|state| {
+        if state.synchronizations.take().is_none() {
+            return Err(TransactionError::InvalidState(
+                "Cannot deactivate transaction synchronization - not active".into(),
+            ));
+        }
+        Ok(())
+    })
+}
 
-    pub fn set_current_transaction_read_only(read_only: bool) {
-        let _ = write(|state| {
-            state.current_transaction_read_only = read_only;
-            Ok(())
-        });
-    }
+pub fn set_current_transaction_name(name: Option<String>) {
+    let _ = write(|state| {
+        state.current_transaction_name = name;
+        Ok(())
+    });
+}
 
-    pub fn is_current_transaction_read_only() -> bool {
-        read(false, |state| state.current_transaction_read_only)
-    }
+pub fn current_transaction_name() -> Option<String> {
+    read(None, |state| state.current_transaction_name.clone())
+}
 
-    pub fn set_current_transaction_isolation_level(isolation_level: Option<Isolation>) {
-        let _ = write(|state| {
-            state.current_transaction_isolation_level = isolation_level;
-            Ok(())
-        });
-    }
+pub fn set_current_transaction_read_only(read_only: bool) {
+    let _ = write(|state| {
+        state.current_transaction_read_only = read_only;
+        Ok(())
+    });
+}
 
-    pub fn current_transaction_isolation_level() -> Option<Isolation> {
-        read(None, |state| state.current_transaction_isolation_level)
-    }
+pub fn is_current_transaction_read_only() -> bool {
+    read(false, |state| state.current_transaction_read_only)
+}
 
-    pub fn set_actual_transaction_active(active: bool) {
-        let _ = write(|state| {
-            state.actual_transaction_active = active;
-            Ok(())
-        });
-    }
+pub fn set_current_transaction_isolation_level(isolation_level: Option<Isolation>) {
+    let _ = write(|state| {
+        state.current_transaction_isolation_level = isolation_level;
+        Ok(())
+    });
+}
 
-    pub fn is_actual_transaction_active() -> bool {
-        read(false, |state| state.actual_transaction_active)
-    }
+pub fn current_transaction_isolation_level() -> Option<Isolation> {
+    read(None, |state| state.current_transaction_isolation_level)
+}
 
-    pub fn clear() {
-        let _ = write(|state| {
-            state.synchronizations = None;
-            state.current_transaction_name = None;
-            state.current_transaction_read_only = false;
-            state.current_transaction_isolation_level = None;
-            state.actual_transaction_active = false;
-            Ok(())
-        });
-    }
+pub fn set_actual_transaction_active(active: bool) {
+    let _ = write(|state| {
+        state.actual_transaction_active = active;
+        Ok(())
+    });
+}
+
+pub fn is_actual_transaction_active() -> bool {
+    read(false, |state| state.actual_transaction_active)
+}
+
+pub fn clear() {
+    let _ = write(|state| {
+        state.synchronizations = None;
+        state.current_transaction_name = None;
+        state.current_transaction_read_only = false;
+        state.current_transaction_isolation_level = None;
+        state.actual_transaction_active = false;
+        Ok(())
+    });
 }
 
 struct SynchronizedResource {
@@ -314,15 +310,15 @@ impl TransactionSynchronization for SynchronizedResource {
     fn suspend(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async {
             write(|state| {
-                do_unbind_resource(state, &self.key);
+                unbind(state, &self.key);
                 Ok(())
             })
         })
     }
     fn resume(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async {
-            write(|state| match do_bind_resource(state, self.key.clone(), self.value.clone()) {
-                Some(_) => Err(TransactionError::IllegalState(format!(
+            write(|state| match bind(state, self.key.clone(), self.value.clone()) {
+                Some(_) => Err(TransactionError::InvalidState(format!(
                     "Unexpected value for key [{:?}] bound on resume",
                     self.key
                 ))),
@@ -333,9 +329,9 @@ impl TransactionSynchronization for SynchronizedResource {
     fn after_completion(&self, _status: CompletionStatus) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async {
             write(|state| {
-                do_unbind_resource(state, &self.key);
+                unbind(state, &self.key);
                 if let Some(old_value) = &self.old_value {
-                    do_bind_resource(state, self.key.clone(), old_value.clone());
+                    bind(state, self.key.clone(), old_value.clone());
                 }
                 Ok(())
             })?;
@@ -344,79 +340,75 @@ impl TransactionSynchronization for SynchronizedResource {
     }
 }
 
-pub struct TransactionSynchronizationUtils;
-
-impl TransactionSynchronizationUtils {
-    pub async fn trigger_flush() -> Result<(), TransactionError> {
-        if TransactionSynchronizationManager::is_synchronization_active() {
-            for synchronization in TransactionSynchronizationManager::get_synchronizations()? {
-                synchronization.flush().await.map_err(TransactionError::Unexpected)?;
-            }
+pub async fn trigger_flush() -> Result<(), TransactionError> {
+    if is_synchronization_active() {
+        for synchronization in synchronizations()? {
+            synchronization.flush().await.map_err(TransactionError::Other)?;
         }
-        Ok(())
     }
+    Ok(())
+}
 
-    pub(crate) async fn trigger_savepoint(savepoint: &Savepoint) -> Result<(), TransactionError> {
-        if TransactionSynchronizationManager::is_synchronization_active() {
-            for synchronization in TransactionSynchronizationManager::get_synchronizations()? {
-                synchronization.savepoint(savepoint).await.map_err(TransactionError::Unexpected)?;
-            }
+pub(crate) async fn trigger_savepoint(savepoint: &Savepoint) -> Result<(), TransactionError> {
+    if is_synchronization_active() {
+        for synchronization in synchronizations()? {
+            synchronization.savepoint(savepoint).await.map_err(TransactionError::Other)?;
         }
-        Ok(())
     }
+    Ok(())
+}
 
-    pub(crate) async fn trigger_savepoint_rollback(savepoint: &Savepoint) -> Result<(), TransactionError> {
-        if TransactionSynchronizationManager::is_synchronization_active() {
-            for synchronization in TransactionSynchronizationManager::get_synchronizations()? {
-                synchronization.savepoint_rollback(savepoint).await.map_err(TransactionError::Unexpected)?;
-            }
+pub(crate) async fn trigger_savepoint_rollback(savepoint: &Savepoint) -> Result<(), TransactionError> {
+    if is_synchronization_active() {
+        for synchronization in synchronizations()? {
+            synchronization.savepoint_rollback(savepoint).await.map_err(TransactionError::Other)?;
         }
-        Ok(())
     }
+    Ok(())
+}
 
-    pub async fn trigger_before_commit(read_only: bool) -> Result<(), TransactionError> {
-        for synchronization in TransactionSynchronizationManager::get_synchronizations()? {
-            synchronization.before_commit(read_only).await.map_err(TransactionError::Unexpected)?;
+pub async fn trigger_before_commit(read_only: bool) -> Result<(), TransactionError> {
+    for synchronization in synchronizations()? {
+        synchronization.before_commit(read_only).await.map_err(TransactionError::Other)?;
+    }
+    Ok(())
+}
+
+pub async fn trigger_before_completion() -> Result<(), TransactionError> {
+    for synchronization in synchronizations()? {
+        if let Err(error) = synchronization.before_completion().await {
+            tracing::error!(%error, "TransactionSynchronization.beforeCompletion threw exception");
         }
-        Ok(())
     }
+    Ok(())
+}
 
-    pub async fn trigger_before_completion() -> Result<(), TransactionError> {
-        for synchronization in TransactionSynchronizationManager::get_synchronizations()? {
-            if let Err(error) = synchronization.before_completion().await {
-                tracing::error!(%error, "TransactionSynchronization.beforeCompletion threw exception");
-            }
-        }
-        Ok(())
+pub async fn trigger_after_commit() -> Result<(), TransactionError> {
+    invoke_after_commit(&synchronizations()?).await
+}
+
+pub async fn invoke_after_commit(
+    synchronizations: &[Arc<dyn TransactionSynchronization>],
+) -> Result<(), TransactionError> {
+    for synchronization in synchronizations {
+        synchronization.after_commit().await.map_err(TransactionError::Other)?;
     }
+    Ok(())
+}
 
-    pub async fn trigger_after_commit() -> Result<(), TransactionError> {
-        Self::invoke_after_commit(&TransactionSynchronizationManager::get_synchronizations()?).await
-    }
+pub async fn trigger_after_completion(completion_status: CompletionStatus) -> Result<(), TransactionError> {
+    let synchronizations = synchronizations()?;
+    invoke_after_completion(&synchronizations, completion_status).await;
+    Ok(())
+}
 
-    pub async fn invoke_after_commit(
-        synchronizations: &[Arc<dyn TransactionSynchronization>],
-    ) -> Result<(), TransactionError> {
-        for synchronization in synchronizations {
-            synchronization.after_commit().await.map_err(TransactionError::Unexpected)?;
-        }
-        Ok(())
-    }
-
-    pub async fn trigger_after_completion(completion_status: CompletionStatus) -> Result<(), TransactionError> {
-        let synchronizations = TransactionSynchronizationManager::get_synchronizations()?;
-        Self::invoke_after_completion(&synchronizations, completion_status).await;
-        Ok(())
-    }
-
-    pub async fn invoke_after_completion(
-        synchronizations: &[Arc<dyn TransactionSynchronization>],
-        completion_status: CompletionStatus,
-    ) {
-        for synchronization in synchronizations {
-            if let Err(error) = synchronization.after_completion(completion_status).await {
-                tracing::error!(%error, "TransactionSynchronization.afterCompletion threw exception");
-            }
+pub async fn invoke_after_completion(
+    synchronizations: &[Arc<dyn TransactionSynchronization>],
+    completion_status: CompletionStatus,
+) {
+    for synchronization in synchronizations {
+        if let Err(error) = synchronization.after_completion(completion_status).await {
+            tracing::error!(%error, "TransactionSynchronization.afterCompletion threw exception");
         }
     }
 }

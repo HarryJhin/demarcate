@@ -2,10 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dtx_core::{
-    AbstractPlatformTransactionManager, DefaultTransactionDefinition, PlatformTransactionManager, Propagation,
-    TemplateError, TransactionDefinition, TransactionDriver, TransactionError, TransactionExecution,
-    TransactionExecutionListener, TransactionSynchronizationManager, TransactionSynchronizationMode,
-    TransactionTemplate,
+    PlatformTransactionManager, Propagation, SynchronizationMode, TemplateError, TransactionDefinition,
+    TransactionDriver, TransactionError, TransactionExecution, TransactionExecutionListener, TransactionManager,
+    TransactionTemplate, synchronization,
 };
 
 #[derive(Default)]
@@ -27,16 +26,16 @@ impl TransactionDriver for TestDriver {
     type Transaction = &'static str;
     type Suspended = ();
 
-    fn do_get_transaction(&self) -> Result<Self::Transaction, TransactionError> {
+    fn transaction(&self) -> Result<Self::Transaction, TransactionError> {
         Ok("transaction")
     }
     fn is_existing_transaction(&self, _transaction: &Self::Transaction) -> bool {
         self.existing_transaction
     }
-    async fn do_begin(
+    async fn begin(
         &self,
         transaction: &Self::Transaction,
-        _definition: &dyn TransactionDefinition,
+        _definition: &TransactionDefinition,
     ) -> Result<(), TransactionError> {
         assert_eq!(*transaction, "transaction");
         if !self.can_create_transaction {
@@ -48,16 +47,16 @@ impl TransactionDriver for TestDriver {
         self.flags.begin.store(true, Ordering::SeqCst);
         Ok(())
     }
-    async fn do_commit(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
+    async fn commit(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
         assert_eq!(*transaction, "transaction");
         self.flags.commit.store(true, Ordering::SeqCst);
         Ok(())
     }
-    async fn do_rollback(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
+    async fn rollback(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
         assert_eq!(*transaction, "transaction");
         self.flags.rollback.store(true, Ordering::SeqCst);
         if self.fail_rollback {
-            return Err(TransactionError::TransactionSystem {
+            return Err(TransactionError::System {
                 message: "system exception".into(),
                 source: None,
                 application: None,
@@ -65,7 +64,7 @@ impl TransactionDriver for TestDriver {
         }
         Ok(())
     }
-    fn do_set_rollback_only(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
+    fn set_rollback_only(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
         assert_eq!(*transaction, "transaction");
         self.flags.rollback_only.store(true, Ordering::SeqCst);
         Ok(())
@@ -104,7 +103,7 @@ impl TransactionExecutionListener for TestListener {
 }
 
 struct Fixture {
-    tm: AbstractPlatformTransactionManager<TestDriver>,
+    tm: TransactionManager<TestDriver>,
     flags: Arc<Flags>,
     listener: Arc<TestListener>,
 }
@@ -112,13 +111,13 @@ struct Fixture {
 fn fixture(existing_transaction: bool, fail_rollback: bool) -> Fixture {
     let flags = Arc::new(Flags::default());
     let listener = Arc::new(TestListener::default());
-    let mut tm = AbstractPlatformTransactionManager::new(TestDriver {
+    let mut tm = TransactionManager::new(TestDriver {
         existing_transaction,
         can_create_transaction: true,
         fail_rollback,
         flags: flags.clone(),
     });
-    tm.set_transaction_synchronization(TransactionSynchronizationMode::Never);
+    tm.settings_mut().transaction_synchronization = SynchronizationMode::Never;
     tm.add_listener(listener.clone());
     Fixture { tm, flags, listener }
 }
@@ -144,30 +143,30 @@ fn listener(l: &TestListener) -> [bool; 6] {
 }
 
 async fn scoped<F: Future>(future: F) -> F::Output {
-    TransactionSynchronizationManager::scope(async {
+    synchronization::scope(async {
         let output = future.await;
-        assert!(TransactionSynchronizationManager::resource_keys().is_empty());
-        assert!(!TransactionSynchronizationManager::is_synchronization_active());
+        assert!(synchronization::resource_keys().is_empty());
+        assert!(!synchronization::is_synchronization_active());
         output
     })
     .await
 }
 
-fn definition(propagation: Propagation) -> DefaultTransactionDefinition {
-    DefaultTransactionDefinition::with_propagation(propagation)
+fn definition(propagation: Propagation) -> TransactionDefinition {
+    TransactionDefinition::with_propagation(propagation)
 }
 
 #[tokio::test]
 async fn no_existing_transaction() {
     scoped(async {
         let f = fixture(false, false);
-        let status1 = f.tm.get_status(Some(&definition(Propagation::Supports))).await.unwrap();
+        let status1 = f.tm.status(Some(&definition(Propagation::Supports))).await.unwrap();
         assert!(!status1.has_transaction());
-        let status2 = f.tm.get_status(Some(&definition(Propagation::Required))).await.unwrap();
+        let status2 = f.tm.status(Some(&definition(Propagation::Required))).await.unwrap();
         assert!(status2.has_transaction());
         assert!(status2.is_new_transaction());
-        let error = f.tm.get_status(Some(&definition(Propagation::Mandatory))).await.err().unwrap();
-        assert!(matches!(error, TransactionError::IllegalTransactionState(_)));
+        let error = f.tm.status(Some(&definition(Propagation::Mandatory))).await.err().unwrap();
+        assert!(matches!(error, TransactionError::InvalidTransactionState(_)));
     })
     .await;
 }
@@ -177,7 +176,7 @@ async fn existing_transaction() {
     scoped(async {
         let f = fixture(true, false);
         for propagation in [Propagation::Supports, Propagation::Required, Propagation::Mandatory] {
-            let status = f.tm.get_status(Some(&definition(propagation))).await.unwrap();
+            let status = f.tm.status(Some(&definition(propagation))).await.unwrap();
             assert!(status.transaction().is_some());
             assert!(!status.is_new_transaction());
         }
@@ -189,7 +188,7 @@ async fn existing_transaction() {
 async fn commit_without_existing_transaction() {
     scoped(async {
         let f = fixture(false, false);
-        let status = f.tm.get_transaction(None).await.unwrap();
+        let status = f.tm.transaction(None).await.unwrap();
         f.tm.commit(status.as_ref()).await.unwrap();
         assert_eq!(flags(&f.flags), [true, true, false, false]);
         assert_eq!(listener(&f.listener), [true, true, true, true, false, false]);
@@ -201,7 +200,7 @@ async fn commit_without_existing_transaction() {
 async fn rollback_without_existing_transaction() {
     scoped(async {
         let f = fixture(false, false);
-        let status = f.tm.get_transaction(None).await.unwrap();
+        let status = f.tm.transaction(None).await.unwrap();
         f.tm.rollback(status.as_ref()).await.unwrap();
         assert_eq!(flags(&f.flags), [true, false, true, false]);
         assert_eq!(listener(&f.listener), [true, true, false, false, true, true]);
@@ -213,7 +212,7 @@ async fn rollback_without_existing_transaction() {
 async fn rollback_only_without_existing_transaction() {
     scoped(async {
         let f = fixture(false, false);
-        let status = f.tm.get_transaction(None).await.unwrap();
+        let status = f.tm.transaction(None).await.unwrap();
         status.set_rollback_only().unwrap();
         f.tm.commit(status.as_ref()).await.unwrap();
         assert_eq!(flags(&f.flags), [true, false, true, false]);
@@ -226,7 +225,7 @@ async fn rollback_only_without_existing_transaction() {
 async fn commit_with_existing_transaction() {
     scoped(async {
         let f = fixture(true, false);
-        let status = f.tm.get_transaction(None).await.unwrap();
+        let status = f.tm.transaction(None).await.unwrap();
         f.tm.commit(status.as_ref()).await.unwrap();
         assert_eq!(flags(&f.flags), [false, false, false, false]);
         assert_eq!(listener(&f.listener), [false; 6]);
@@ -238,7 +237,7 @@ async fn commit_with_existing_transaction() {
 async fn rollback_with_existing_transaction() {
     scoped(async {
         let f = fixture(true, false);
-        let status = f.tm.get_transaction(None).await.unwrap();
+        let status = f.tm.transaction(None).await.unwrap();
         f.tm.rollback(status.as_ref()).await.unwrap();
         assert_eq!(flags(&f.flags), [false, false, false, true]);
         assert_eq!(listener(&f.listener), [false; 6]);
@@ -250,7 +249,7 @@ async fn rollback_with_existing_transaction() {
 async fn rollback_only_with_existing_transaction() {
     scoped(async {
         let f = fixture(true, false);
-        let status = f.tm.get_transaction(None).await.unwrap();
+        let status = f.tm.transaction(None).await.unwrap();
         status.set_rollback_only().unwrap();
         f.tm.commit(status.as_ref()).await.unwrap();
         assert_eq!(flags(&f.flags), [false, false, false, true]);
@@ -291,7 +290,7 @@ async fn transaction_template_with_rollback_exception() {
         match result {
             Err(TemplateError::Rollback { application, rollback }) => {
                 assert_eq!(application, "Some application exception");
-                assert!(matches!(rollback, TransactionError::TransactionSystem { .. }));
+                assert!(matches!(rollback, TransactionError::System { .. }));
             }
             other => panic!("unexpected result: {other:?}"),
         }
@@ -304,10 +303,10 @@ async fn transaction_template_with_rollback_exception() {
 async fn commit_twice_is_rejected() {
     scoped(async {
         let f = fixture(false, false);
-        let status = f.tm.get_transaction(None).await.unwrap();
+        let status = f.tm.transaction(None).await.unwrap();
         f.tm.commit(status.as_ref()).await.unwrap();
         let error = f.tm.commit(status.as_ref()).await.err().unwrap();
-        assert!(matches!(error, TransactionError::IllegalTransactionState(_)));
+        assert!(matches!(error, TransactionError::InvalidTransactionState(_)));
     })
     .await;
 }

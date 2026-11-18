@@ -1,18 +1,17 @@
 use std::sync::Arc;
 
 use crate::BoxFuture;
-use crate::definition::{Isolation, Propagation, StaticTransactionDefinition, TIMEOUT_DEFAULT, TransactionDefinition};
+use std::time::Duration;
+
+use crate::definition::{Isolation, Propagation, TransactionDefinition};
 use crate::driver::TransactionDriver;
 use crate::error::TransactionError;
 use crate::listener::TransactionExecutionListener;
-use crate::status::{DefaultTransactionStatus, TransactionExecution, TransactionStatus};
-use crate::synchronization::{
-    CompletionStatus, TransactionSynchronization, TransactionSynchronizationManager as Tsm,
-    TransactionSynchronizationUtils as Utils,
-};
+use crate::status::{ManagedTransactionStatus, TransactionExecution, TransactionStatus};
+use crate::synchronization::{self, CompletionStatus, TransactionSynchronization};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TransactionSynchronizationMode {
+pub enum SynchronizationMode {
     #[default]
     Always,
     OnActualTransaction,
@@ -20,9 +19,9 @@ pub enum TransactionSynchronizationMode {
 }
 
 pub trait PlatformTransactionManager: Send + Sync {
-    fn get_transaction<'a>(
+    fn transaction<'a>(
         &'a self,
-        definition: Option<&'a dyn TransactionDefinition>,
+        definition: Option<&'a TransactionDefinition>,
     ) -> BoxFuture<'a, Result<Arc<dyn TransactionStatus>, TransactionError>>;
 
     fn commit<'a>(&'a self, status: &'a dyn TransactionStatus) -> BoxFuture<'a, Result<(), TransactionError>>;
@@ -39,132 +38,88 @@ pub struct SuspendedResourcesHolder<D: TransactionDriver> {
     was_active: bool,
 }
 
-pub struct AbstractPlatformTransactionManager<D: TransactionDriver> {
-    driver: Arc<D>,
-    transaction_synchronization: TransactionSynchronizationMode,
-    default_timeout: i32,
-    nested_transaction_allowed: bool,
-    validate_existing_transaction: bool,
-    global_rollback_on_participation_failure: bool,
-    fail_early_on_global_rollback_only: bool,
-    rollback_on_commit_failure: bool,
-    transaction_execution_listeners: Vec<Arc<dyn TransactionExecutionListener>>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagerSettings {
+    pub transaction_synchronization: SynchronizationMode,
+    pub default_timeout: Option<Duration>,
+    pub nested_transaction_allowed: bool,
+    pub validate_existing_transaction: bool,
+    pub global_rollback_on_participation_failure: bool,
+    pub fail_early_on_global_rollback_only: bool,
+    pub rollback_on_commit_failure: bool,
 }
 
-type Status<D> = Arc<DefaultTransactionStatus<D>>;
-
-impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
-    pub fn new(driver: D) -> Self {
-        Self::from_arc(Arc::new(driver))
-    }
-
-    pub fn from_arc(driver: Arc<D>) -> Self {
+impl Default for ManagerSettings {
+    fn default() -> Self {
         Self {
-            driver,
-            transaction_synchronization: TransactionSynchronizationMode::Always,
-            default_timeout: TIMEOUT_DEFAULT,
+            transaction_synchronization: SynchronizationMode::Always,
+            default_timeout: None,
             nested_transaction_allowed: false,
             validate_existing_transaction: false,
             global_rollback_on_participation_failure: true,
             fail_early_on_global_rollback_only: false,
             rollback_on_commit_failure: false,
-            transaction_execution_listeners: Vec::new(),
         }
+    }
+}
+
+pub struct TransactionManager<D: TransactionDriver> {
+    driver: Arc<D>,
+    settings: ManagerSettings,
+    listeners: Vec<Arc<dyn TransactionExecutionListener>>,
+}
+
+type Status<D> = Arc<ManagedTransactionStatus<D>>;
+
+impl<D: TransactionDriver> TransactionManager<D> {
+    pub fn new(driver: D) -> Self {
+        Self::with_settings(driver, ManagerSettings::default())
+    }
+
+    pub fn with_settings(driver: D, settings: ManagerSettings) -> Self {
+        Self { driver: Arc::new(driver), settings, listeners: Vec::new() }
     }
 
     pub fn driver(&self) -> &Arc<D> {
         &self.driver
     }
-    pub fn set_transaction_synchronization(&mut self, mode: TransactionSynchronizationMode) {
-        self.transaction_synchronization = mode;
+    pub fn settings(&self) -> &ManagerSettings {
+        &self.settings
     }
-    pub fn transaction_synchronization(&self) -> TransactionSynchronizationMode {
-        self.transaction_synchronization
-    }
-    pub fn set_default_timeout(&mut self, default_timeout: i32) -> Result<(), TransactionError> {
-        if default_timeout < TIMEOUT_DEFAULT {
-            return Err(TransactionError::InvalidTimeout {
-                message: "Invalid default timeout".into(),
-                timeout: default_timeout,
-            });
-        }
-        self.default_timeout = default_timeout;
-        Ok(())
-    }
-    pub fn default_timeout(&self) -> i32 {
-        self.default_timeout
-    }
-    pub fn set_nested_transaction_allowed(&mut self, allowed: bool) {
-        self.nested_transaction_allowed = allowed;
-    }
-    pub fn is_nested_transaction_allowed(&self) -> bool {
-        self.nested_transaction_allowed
-    }
-    pub fn set_validate_existing_transaction(&mut self, validate: bool) {
-        self.validate_existing_transaction = validate;
-    }
-    pub fn is_validate_existing_transaction(&self) -> bool {
-        self.validate_existing_transaction
-    }
-    pub fn set_global_rollback_on_participation_failure(&mut self, value: bool) {
-        self.global_rollback_on_participation_failure = value;
-    }
-    pub fn is_global_rollback_on_participation_failure(&self) -> bool {
-        self.global_rollback_on_participation_failure
-    }
-    pub fn set_fail_early_on_global_rollback_only(&mut self, value: bool) {
-        self.fail_early_on_global_rollback_only = value;
-    }
-    pub fn is_fail_early_on_global_rollback_only(&self) -> bool {
-        self.fail_early_on_global_rollback_only
-    }
-    pub fn set_rollback_on_commit_failure(&mut self, value: bool) {
-        self.rollback_on_commit_failure = value;
-    }
-    pub fn is_rollback_on_commit_failure(&self) -> bool {
-        self.rollback_on_commit_failure
-    }
-    pub fn set_transaction_execution_listeners(&mut self, listeners: Vec<Arc<dyn TransactionExecutionListener>>) {
-        self.transaction_execution_listeners = listeners;
+    pub fn settings_mut(&mut self) -> &mut ManagerSettings {
+        &mut self.settings
     }
     pub fn add_listener(&mut self, listener: Arc<dyn TransactionExecutionListener>) {
-        self.transaction_execution_listeners.push(listener);
+        self.listeners.push(listener);
     }
-    pub fn transaction_execution_listeners(&self) -> &[Arc<dyn TransactionExecutionListener>] {
-        &self.transaction_execution_listeners
-    }
-
-    pub fn determine_timeout(&self, definition: &dyn TransactionDefinition) -> i32 {
-        if definition.timeout() != TIMEOUT_DEFAULT { definition.timeout() } else { self.default_timeout }
+    pub fn listeners(&self) -> &[Arc<dyn TransactionExecutionListener>] {
+        &self.listeners
     }
 
-    fn listeners(&self, f: impl Fn(&dyn TransactionExecutionListener)) {
-        for listener in &self.transaction_execution_listeners {
+    pub fn determine_timeout(&self, definition: &TransactionDefinition) -> Option<Duration> {
+        definition.timeout.or(self.settings.default_timeout)
+    }
+
+    fn notify(&self, f: impl Fn(&dyn TransactionExecutionListener)) {
+        for listener in &self.listeners {
             f(listener.as_ref());
         }
     }
 
-    pub async fn get_status(
+    pub async fn status(
         &self,
-        definition: Option<&dyn TransactionDefinition>,
+        definition: Option<&TransactionDefinition>,
     ) -> Result<Status<D>, TransactionError> {
-        let defaults = StaticTransactionDefinition;
-        let def: &dyn TransactionDefinition = definition.unwrap_or(&defaults);
-        let transaction = self.driver.do_get_transaction()?;
+        let defaults = TransactionDefinition::default();
+        let def = definition.unwrap_or(&defaults);
+        let transaction = self.driver.transaction()?;
 
         if self.driver.is_existing_transaction(&transaction) {
             return self.handle_existing_transaction(def, transaction).await;
         }
 
-        if def.timeout() < TIMEOUT_DEFAULT {
-            return Err(TransactionError::InvalidTimeout {
-                message: "Invalid transaction timeout".into(),
-                timeout: def.timeout(),
-            });
-        }
-
-        match def.propagation_behavior() {
-            Propagation::Mandatory => Err(TransactionError::IllegalTransactionState(
+        match def.propagation {
+            Propagation::Mandatory => Err(TransactionError::InvalidTransactionState(
                 "No existing transaction found for transaction marked with propagation 'mandatory'".into(),
             )),
             Propagation::Required | Propagation::RequiresNew | Propagation::Nested => {
@@ -178,13 +133,13 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
                 }
             }
             _ => {
-                if def.isolation_level() != Isolation::Default {
+                if def.isolation != Isolation::Default {
                     tracing::warn!(
                         "Custom isolation level specified but no actual transaction initiated; \
                          isolation level will effectively be ignored"
                     );
                 }
-                let new_synchronization = self.transaction_synchronization == TransactionSynchronizationMode::Always;
+                let new_synchronization = self.settings.transaction_synchronization == SynchronizationMode::Always;
                 self.prepare_transaction_status(def, None, true, new_synchronization, None)
             }
         }
@@ -192,18 +147,18 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
 
     async fn handle_existing_transaction(
         &self,
-        definition: &dyn TransactionDefinition,
+        definition: &TransactionDefinition,
         transaction: D::Transaction,
     ) -> Result<Status<D>, TransactionError> {
-        match definition.propagation_behavior() {
+        match definition.propagation {
             Propagation::Never => {
-                return Err(TransactionError::IllegalTransactionState(
+                return Err(TransactionError::InvalidTransactionState(
                     "Existing transaction found for transaction marked with propagation 'never'".into(),
                 ));
             }
             Propagation::NotSupported => {
                 let suspended = self.suspend(Some(&transaction)).await?;
-                let new_synchronization = self.transaction_synchronization == TransactionSynchronizationMode::Always;
+                let new_synchronization = self.settings.transaction_synchronization == SynchronizationMode::Always;
                 return self.prepare_transaction_status(definition, None, false, new_synchronization, suspended);
             }
             Propagation::RequiresNew => {
@@ -223,8 +178,8 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
                 };
             }
             Propagation::Nested => {
-                if !self.nested_transaction_allowed {
-                    return Err(TransactionError::NestedTransactionNotSupported(
+                if !self.settings.nested_transaction_allowed {
+                    return Err(TransactionError::NestedNotSupported(
                         "Transaction manager does not allow nested transactions by default - \
                          specify 'nestedTransactionAllowed' property with value 'true'"
                             .into(),
@@ -232,13 +187,13 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
                 }
                 if self.driver.use_savepoint_for_nested_transaction() {
                     let status = self.new_transaction_status(definition, Some(transaction), false, false, true, None);
-                    self.listeners(|listener| listener.before_begin(status.as_ref()));
+                    self.notify(|listener| listener.before_begin(status.as_ref()));
                     if let Err(error) = status.create_and_hold_savepoint().await {
-                        self.listeners(|listener| listener.after_begin(status.as_ref(), Some(&error)));
+                        self.notify(|listener| listener.after_begin(status.as_ref(), Some(&error)));
                         status.set_completed();
                         return Err(error);
                     }
-                    self.listeners(|listener| listener.after_begin(status.as_ref(), None));
+                    self.notify(|listener| listener.after_begin(status.as_ref(), None));
                     return Ok(status);
                 }
                 return self.start_transaction(definition, transaction, true, None).await.map_err(|(error, _, _)| error);
@@ -246,57 +201,57 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
             _ => {}
         }
 
-        if self.validate_existing_transaction {
-            if definition.isolation_level() != Isolation::Default {
-                let current = Tsm::current_transaction_isolation_level();
-                if current != Some(definition.isolation_level()) {
-                    return Err(TransactionError::IllegalTransactionState(format!(
+        if self.settings.validate_existing_transaction {
+            if definition.isolation != Isolation::Default {
+                let current = synchronization::current_transaction_isolation_level();
+                if current != Some(definition.isolation) {
+                    return Err(TransactionError::InvalidTransactionState(format!(
                         "Participating transaction with definition specifies isolation level which is \
                          incompatible with existing transaction: {}",
                         current.map_or_else(|| "(unknown)".to_owned(), |level| format!("{level:?}"))
                     )));
                 }
             }
-            if !definition.is_read_only() && Tsm::is_current_transaction_read_only() {
-                return Err(TransactionError::IllegalTransactionState(
+            if !definition.read_only && synchronization::is_current_transaction_read_only() {
+                return Err(TransactionError::InvalidTransactionState(
                     "Participating transaction with definition is not marked as read-only but existing transaction is"
                         .into(),
                 ));
             }
         }
-        let new_synchronization = self.transaction_synchronization != TransactionSynchronizationMode::Never;
+        let new_synchronization = self.settings.transaction_synchronization != SynchronizationMode::Never;
         self.prepare_transaction_status(definition, Some(transaction), false, new_synchronization, None)
     }
 
     async fn start_transaction(
         &self,
-        definition: &dyn TransactionDefinition,
+        definition: &TransactionDefinition,
         transaction: D::Transaction,
         nested: bool,
         suspended: Option<SuspendedResourcesHolder<D>>,
     ) -> Result<Status<D>, (TransactionError, Option<SuspendedResourcesHolder<D>>, Status<D>)> {
-        let new_synchronization = self.transaction_synchronization != TransactionSynchronizationMode::Never;
+        let new_synchronization = self.settings.transaction_synchronization != SynchronizationMode::Never;
         let status =
             self.new_transaction_status(definition, Some(transaction), true, new_synchronization, nested, suspended);
-        self.listeners(|listener| listener.before_begin(status.as_ref()));
-        let begun = self.driver.do_begin(status.transaction().expect("transaction present"), definition).await;
+        self.notify(|listener| listener.before_begin(status.as_ref()));
+        let begun = self.driver.begin(status.transaction().expect("transaction present"), definition).await;
         let prepared = match begun {
             Ok(()) => self.prepare_synchronization(&status, definition),
             Err(error) => Err(error),
         };
         if let Err(error) = prepared {
-            self.listeners(|listener| listener.after_begin(status.as_ref(), Some(&error)));
+            self.notify(|listener| listener.after_begin(status.as_ref(), Some(&error)));
             status.set_completed();
             let suspended = status.take_suspended_resources();
             return Err((error, suspended, status));
         }
-        self.listeners(|listener| listener.after_begin(status.as_ref(), None));
+        self.notify(|listener| listener.after_begin(status.as_ref(), None));
         Ok(status)
     }
 
     fn prepare_transaction_status(
         &self,
-        definition: &dyn TransactionDefinition,
+        definition: &TransactionDefinition,
         transaction: Option<D::Transaction>,
         new_transaction: bool,
         new_synchronization: bool,
@@ -310,39 +265,39 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
 
     fn new_transaction_status(
         &self,
-        definition: &dyn TransactionDefinition,
+        definition: &TransactionDefinition,
         transaction: Option<D::Transaction>,
         new_transaction: bool,
         new_synchronization: bool,
         nested: bool,
         suspended: Option<SuspendedResourcesHolder<D>>,
     ) -> Status<D> {
-        let actual_new_synchronization = new_synchronization && !Tsm::is_synchronization_active();
-        Arc::new(DefaultTransactionStatus::new(
+        let actual_new_synchronization = new_synchronization && !synchronization::is_synchronization_active();
+        Arc::new(ManagedTransactionStatus::new(
             self.driver.clone(),
-            definition.name().map(str::to_owned),
+            definition.name.clone(),
             transaction,
             new_transaction,
             actual_new_synchronization,
             nested,
-            definition.is_read_only(),
+            definition.read_only,
             suspended,
         ))
     }
 
     fn prepare_synchronization(
         &self,
-        status: &DefaultTransactionStatus<D>,
-        definition: &dyn TransactionDefinition,
+        status: &ManagedTransactionStatus<D>,
+        definition: &TransactionDefinition,
     ) -> Result<(), TransactionError> {
         if status.is_new_synchronization() {
-            Tsm::init_synchronization()?;
-            Tsm::set_actual_transaction_active(status.has_transaction());
-            Tsm::set_current_transaction_isolation_level(
-                (definition.isolation_level() != Isolation::Default).then(|| definition.isolation_level()),
+            synchronization::init_synchronization()?;
+            synchronization::set_actual_transaction_active(status.has_transaction());
+            synchronization::set_current_transaction_isolation_level(
+                (definition.isolation != Isolation::Default).then_some(definition.isolation),
             );
-            Tsm::set_current_transaction_read_only(definition.is_read_only());
-            Tsm::set_current_transaction_name(definition.name().map(str::to_owned));
+            synchronization::set_current_transaction_read_only(definition.read_only);
+            synchronization::set_current_transaction_name(definition.name.clone());
         }
         Ok(())
     }
@@ -351,26 +306,26 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
         &self,
         transaction: Option<&D::Transaction>,
     ) -> Result<Option<SuspendedResourcesHolder<D>>, TransactionError> {
-        if Tsm::is_synchronization_active() {
-            let suspended_synchronizations = self.do_suspend_synchronization().await?;
+        if synchronization::is_synchronization_active() {
+            let suspended_synchronizations = self.suspend_synchronizations().await?;
             let suspended_resources = match transaction {
-                Some(transaction) => match self.driver.do_suspend(transaction).await {
+                Some(transaction) => match self.driver.suspend(transaction).await {
                     Ok(resources) => Some(resources),
                     Err(error) => {
-                        self.do_resume_synchronization(suspended_synchronizations).await?;
+                        self.resume_synchronizations(suspended_synchronizations).await?;
                         return Err(error);
                     }
                 },
                 None => None,
             };
-            let name = Tsm::current_transaction_name();
-            Tsm::set_current_transaction_name(None);
-            let read_only = Tsm::is_current_transaction_read_only();
-            Tsm::set_current_transaction_read_only(false);
-            let isolation_level = Tsm::current_transaction_isolation_level();
-            Tsm::set_current_transaction_isolation_level(None);
-            let was_active = Tsm::is_actual_transaction_active();
-            Tsm::set_actual_transaction_active(false);
+            let name = synchronization::current_transaction_name();
+            synchronization::set_current_transaction_name(None);
+            let read_only = synchronization::is_current_transaction_read_only();
+            synchronization::set_current_transaction_read_only(false);
+            let isolation_level = synchronization::current_transaction_isolation_level();
+            synchronization::set_current_transaction_isolation_level(None);
+            let was_active = synchronization::is_actual_transaction_active();
+            synchronization::set_actual_transaction_active(false);
             Ok(Some(SuspendedResourcesHolder {
                 suspended_resources,
                 suspended_synchronizations: Some(suspended_synchronizations),
@@ -380,7 +335,7 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
                 was_active,
             }))
         } else if let Some(transaction) = transaction {
-            let suspended_resources = self.driver.do_suspend(transaction).await?;
+            let suspended_resources = self.driver.suspend(transaction).await?;
             Ok(Some(SuspendedResourcesHolder {
                 suspended_resources: Some(suspended_resources),
                 suspended_synchronizations: None,
@@ -401,49 +356,49 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
     ) -> Result<(), TransactionError> {
         if let Some(holder) = holder {
             if let Some(suspended_resources) = holder.suspended_resources {
-                self.driver.do_resume(transaction, suspended_resources).await?;
+                self.driver.resume(transaction, suspended_resources).await?;
             }
             if let Some(suspended_synchronizations) = holder.suspended_synchronizations {
-                Tsm::set_actual_transaction_active(holder.was_active);
-                Tsm::set_current_transaction_isolation_level(holder.isolation_level);
-                Tsm::set_current_transaction_read_only(holder.read_only);
-                Tsm::set_current_transaction_name(holder.name);
-                self.do_resume_synchronization(suspended_synchronizations).await?;
+                synchronization::set_actual_transaction_active(holder.was_active);
+                synchronization::set_current_transaction_isolation_level(holder.isolation_level);
+                synchronization::set_current_transaction_read_only(holder.read_only);
+                synchronization::set_current_transaction_name(holder.name);
+                self.resume_synchronizations(suspended_synchronizations).await?;
             }
         }
         Ok(())
     }
 
-    async fn do_suspend_synchronization(&self) -> Result<Vec<Arc<dyn TransactionSynchronization>>, TransactionError> {
-        let suspended_synchronizations = Tsm::get_synchronizations()?;
+    async fn suspend_synchronizations(&self) -> Result<Vec<Arc<dyn TransactionSynchronization>>, TransactionError> {
+        let suspended_synchronizations = synchronization::synchronizations()?;
         for synchronization in &suspended_synchronizations {
             synchronization.suspend().await?;
         }
-        Tsm::clear_synchronization()?;
+        synchronization::clear_synchronization()?;
         Ok(suspended_synchronizations)
     }
 
-    async fn do_resume_synchronization(
+    async fn resume_synchronizations(
         &self,
         suspended_synchronizations: Vec<Arc<dyn TransactionSynchronization>>,
     ) -> Result<(), TransactionError> {
-        Tsm::init_synchronization()?;
+        synchronization::init_synchronization()?;
         for synchronization in suspended_synchronizations {
             synchronization.resume().await?;
-            Tsm::register_synchronization(synchronization)?;
+            synchronization::register_synchronization(synchronization)?;
         }
         Ok(())
     }
 
-    fn downcast<'a>(&self, status: &'a dyn TransactionStatus) -> Result<&'a DefaultTransactionStatus<D>, TransactionError> {
-        status.as_any().downcast_ref::<DefaultTransactionStatus<D>>().ok_or_else(|| {
-            TransactionError::IllegalTransactionState("Transaction status was not created by this transaction manager".into())
+    fn downcast<'a>(&self, status: &'a dyn TransactionStatus) -> Result<&'a ManagedTransactionStatus<D>, TransactionError> {
+        status.as_any().downcast_ref::<ManagedTransactionStatus<D>>().ok_or_else(|| {
+            TransactionError::InvalidTransactionState("Transaction status was not created by this transaction manager".into())
         })
     }
 
     pub async fn commit_status(&self, status: &dyn TransactionStatus) -> Result<(), TransactionError> {
         if status.is_completed() {
-            return Err(TransactionError::IllegalTransactionState(
+            return Err(TransactionError::InvalidTransactionState(
                 "Transaction is already completed - do not call commit or rollback more than once per transaction"
                     .into(),
             ));
@@ -460,7 +415,7 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
 
     pub async fn rollback_status(&self, status: &dyn TransactionStatus) -> Result<(), TransactionError> {
         if status.is_completed() {
-            return Err(TransactionError::IllegalTransactionState(
+            return Err(TransactionError::InvalidTransactionState(
                 "Transaction is already completed - do not call commit or rollback more than once per transaction"
                     .into(),
             ));
@@ -469,13 +424,13 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
         self.process_rollback(status, false).await
     }
 
-    async fn process_commit(&self, status: &DefaultTransactionStatus<D>) -> Result<(), TransactionError> {
+    async fn process_commit(&self, status: &ManagedTransactionStatus<D>) -> Result<(), TransactionError> {
         let result = self.process_commit_body(status).await;
         let cleanup = self.cleanup_after_completion(status).await;
         cleanup.and(result)
     }
 
-    async fn process_commit_body(&self, status: &DefaultTransactionStatus<D>) -> Result<(), TransactionError> {
+    async fn process_commit_body(&self, status: &ManagedTransactionStatus<D>) -> Result<(), TransactionError> {
         let mut before_completion_invoked = false;
         let mut commit_listener_invoked = false;
 
@@ -488,15 +443,15 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
 
             if status.has_savepoint() {
                 unexpected_rollback = status.is_global_rollback_only();
-                self.listeners(|listener| listener.before_commit(status));
+                self.notify(|listener| listener.before_commit(status));
                 commit_listener_invoked = true;
                 status.release_held_savepoint().await?;
             } else if status.is_new_transaction() {
                 unexpected_rollback = status.is_global_rollback_only();
-                self.listeners(|listener| listener.before_commit(status));
+                self.notify(|listener| listener.before_commit(status));
                 commit_listener_invoked = true;
-                self.driver.do_commit(status.transaction().expect("transaction present")).await?;
-            } else if self.fail_early_on_global_rollback_only {
+                self.driver.commit(status.transaction().expect("transaction present")).await?;
+            } else if self.settings.fail_early_on_global_rollback_only {
                 unexpected_rollback = status.is_global_rollback_only();
             } else {
                 unexpected_rollback = false;
@@ -514,21 +469,21 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
         if let Err(error) = attempt {
             if matches!(error, TransactionError::UnexpectedRollback(_)) {
                 self.trigger_after_completion(status, CompletionStatus::RolledBack).await?;
-                self.listeners(|listener| listener.after_rollback(status, None));
-            } else if error.is_transaction_exception() {
-                if self.rollback_on_commit_failure {
-                    self.do_rollback_on_commit_exception(status, &error).await?;
+                self.notify(|listener| listener.after_rollback(status, None));
+            } else if error.is_transaction_error() {
+                if self.settings.rollback_on_commit_failure {
+                    self.rollback_on_commit_error(status, &error).await?;
                 } else {
                     self.trigger_after_completion(status, CompletionStatus::Unknown).await?;
                     if commit_listener_invoked {
-                        self.listeners(|listener| listener.after_commit(status, Some(&error)));
+                        self.notify(|listener| listener.after_commit(status, Some(&error)));
                     }
                 }
             } else {
                 if !before_completion_invoked {
                     self.trigger_before_completion(status).await?;
                 }
-                self.do_rollback_on_commit_exception(status, &error).await?;
+                self.rollback_on_commit_error(status, &error).await?;
             }
             return Err(error);
         }
@@ -536,14 +491,14 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
         let after_commit = self.trigger_after_commit(status).await;
         self.trigger_after_completion(status, CompletionStatus::Committed).await?;
         if commit_listener_invoked {
-            self.listeners(|listener| listener.after_commit(status, None));
+            self.notify(|listener| listener.after_commit(status, None));
         }
         after_commit
     }
 
     async fn process_rollback(
         &self,
-        status: &DefaultTransactionStatus<D>,
+        status: &ManagedTransactionStatus<D>,
         unexpected: bool,
     ) -> Result<(), TransactionError> {
         let result = self.process_rollback_body(status, unexpected).await;
@@ -553,7 +508,7 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
 
     async fn process_rollback_body(
         &self,
-        status: &DefaultTransactionStatus<D>,
+        status: &ManagedTransactionStatus<D>,
         unexpected: bool,
     ) -> Result<(), TransactionError> {
         let mut unexpected_rollback = unexpected;
@@ -562,22 +517,22 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
         let attempt: Result<(), TransactionError> = async {
             self.trigger_before_completion(status).await?;
             if status.has_savepoint() {
-                self.listeners(|listener| listener.before_rollback(status));
+                self.notify(|listener| listener.before_rollback(status));
                 rollback_listener_invoked = true;
                 status.rollback_to_held_savepoint().await?;
             } else if status.is_new_transaction() {
-                self.listeners(|listener| listener.before_rollback(status));
+                self.notify(|listener| listener.before_rollback(status));
                 rollback_listener_invoked = true;
-                self.driver.do_rollback(status.transaction().expect("transaction present")).await?;
+                self.driver.rollback(status.transaction().expect("transaction present")).await?;
             } else {
                 if let Some(transaction) = status.transaction() {
-                    if status.is_local_rollback_only() || self.global_rollback_on_participation_failure {
-                        self.driver.do_set_rollback_only(transaction)?;
+                    if status.is_local_rollback_only() || self.settings.global_rollback_on_participation_failure {
+                        self.driver.set_rollback_only(transaction)?;
                     }
                 } else {
                     tracing::debug!("Should roll back transaction but cannot - no transaction available");
                 }
-                if !self.fail_early_on_global_rollback_only {
+                if !self.settings.fail_early_on_global_rollback_only {
                     unexpected_rollback = false;
                 }
             }
@@ -588,14 +543,14 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
         if let Err(error) = attempt {
             self.trigger_after_completion(status, CompletionStatus::Unknown).await?;
             if rollback_listener_invoked {
-                self.listeners(|listener| listener.after_rollback(status, Some(&error)));
+                self.notify(|listener| listener.after_rollback(status, Some(&error)));
             }
             return Err(error);
         }
 
         self.trigger_after_completion(status, CompletionStatus::RolledBack).await?;
         if rollback_listener_invoked {
-            self.listeners(|listener| listener.after_rollback(status, None));
+            self.notify(|listener| listener.after_rollback(status, None));
         }
         if unexpected_rollback {
             return Err(TransactionError::UnexpectedRollback(
@@ -605,64 +560,63 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
         Ok(())
     }
 
-    async fn do_rollback_on_commit_exception(
+    async fn rollback_on_commit_error(
         &self,
-        status: &DefaultTransactionStatus<D>,
+        status: &ManagedTransactionStatus<D>,
         commit_error: &TransactionError,
     ) -> Result<(), TransactionError> {
         let attempt: Result<(), TransactionError> = async {
             if status.is_new_transaction() {
-                self.driver.do_rollback(status.transaction().expect("transaction present")).await?;
-            } else if let Some(transaction) = status.transaction() {
-                if self.global_rollback_on_participation_failure {
-                    self.driver.do_set_rollback_only(transaction)?;
+                self.driver.rollback(status.transaction().expect("transaction present")).await?;
+            } else if let Some(transaction) = status.transaction()
+                && self.settings.global_rollback_on_participation_failure {
+                    self.driver.set_rollback_only(transaction)?;
                 }
-            }
             Ok(())
         }
         .await;
         if let Err(rollback_error) = attempt {
             tracing::error!(error = %commit_error, "Commit exception overridden by rollback exception");
             self.trigger_after_completion(status, CompletionStatus::Unknown).await?;
-            self.listeners(|listener| listener.after_rollback(status, Some(&rollback_error)));
+            self.notify(|listener| listener.after_rollback(status, Some(&rollback_error)));
             return Err(rollback_error);
         }
         self.trigger_after_completion(status, CompletionStatus::RolledBack).await?;
-        self.listeners(|listener| listener.after_rollback(status, None));
+        self.notify(|listener| listener.after_rollback(status, None));
         Ok(())
     }
 
-    async fn trigger_before_commit(&self, status: &DefaultTransactionStatus<D>) -> Result<(), TransactionError> {
+    async fn trigger_before_commit(&self, status: &ManagedTransactionStatus<D>) -> Result<(), TransactionError> {
         if status.is_new_synchronization() {
-            Utils::trigger_before_commit(status.is_read_only()).await?;
+            synchronization::trigger_before_commit(status.is_read_only()).await?;
         }
         Ok(())
     }
 
-    async fn trigger_before_completion(&self, status: &DefaultTransactionStatus<D>) -> Result<(), TransactionError> {
+    async fn trigger_before_completion(&self, status: &ManagedTransactionStatus<D>) -> Result<(), TransactionError> {
         if status.is_new_synchronization() {
-            Utils::trigger_before_completion().await?;
+            synchronization::trigger_before_completion().await?;
         }
         Ok(())
     }
 
-    async fn trigger_after_commit(&self, status: &DefaultTransactionStatus<D>) -> Result<(), TransactionError> {
+    async fn trigger_after_commit(&self, status: &ManagedTransactionStatus<D>) -> Result<(), TransactionError> {
         if status.is_new_synchronization() {
-            Utils::trigger_after_commit().await?;
+            synchronization::trigger_after_commit().await?;
         }
         Ok(())
     }
 
     async fn trigger_after_completion(
         &self,
-        status: &DefaultTransactionStatus<D>,
+        status: &ManagedTransactionStatus<D>,
         completion_status: CompletionStatus,
     ) -> Result<(), TransactionError> {
         if status.is_new_synchronization() {
-            let synchronizations = Tsm::get_synchronizations()?;
-            Tsm::clear_synchronization()?;
+            let synchronizations = synchronization::synchronizations()?;
+            synchronization::clear_synchronization()?;
             if !status.has_transaction() || status.is_new_transaction() {
-                Utils::invoke_after_completion(&synchronizations, completion_status).await;
+                synchronization::invoke_after_completion(&synchronizations, completion_status).await;
             } else if !synchronizations.is_empty() {
                 self.driver
                     .register_after_completion_with_existing_transaction(
@@ -675,13 +629,13 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
         Ok(())
     }
 
-    async fn cleanup_after_completion(&self, status: &DefaultTransactionStatus<D>) -> Result<(), TransactionError> {
+    async fn cleanup_after_completion(&self, status: &ManagedTransactionStatus<D>) -> Result<(), TransactionError> {
         status.set_completed();
         if status.is_new_synchronization() {
-            Tsm::clear();
+            synchronization::clear();
         }
         if status.is_new_transaction() {
-            self.driver.do_cleanup_after_completion(status.transaction().expect("transaction present")).await;
+            self.driver.cleanup_after_completion(status.transaction().expect("transaction present")).await;
         }
         if let Some(suspended) = status.take_suspended_resources() {
             self.resume(status.transaction(), Some(suspended)).await?;
@@ -690,13 +644,13 @@ impl<D: TransactionDriver> AbstractPlatformTransactionManager<D> {
     }
 }
 
-impl<D: TransactionDriver> PlatformTransactionManager for AbstractPlatformTransactionManager<D> {
-    fn get_transaction<'a>(
+impl<D: TransactionDriver> PlatformTransactionManager for TransactionManager<D> {
+    fn transaction<'a>(
         &'a self,
-        definition: Option<&'a dyn TransactionDefinition>,
+        definition: Option<&'a TransactionDefinition>,
     ) -> BoxFuture<'a, Result<Arc<dyn TransactionStatus>, TransactionError>> {
         Box::pin(async move {
-            let status: Arc<dyn TransactionStatus> = self.get_status(definition).await?;
+            let status: Arc<dyn TransactionStatus> = self.status(definition).await?;
             Ok(status)
         })
     }

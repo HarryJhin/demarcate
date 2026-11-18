@@ -3,17 +3,17 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use dtx_core::{
-    BoxError, BoxFuture, CompletionStatus, DefaultTransactionDefinition, Isolation, PlatformTransactionManager,
-    Propagation, TemplateError, TransactionError, TransactionSynchronization,
-    TransactionSynchronizationManager as Tsm, TransactionTemplate,
+    BoxError, BoxFuture, CompletionStatus, Isolation, ManagerSettings, PlatformTransactionManager, Propagation,
+    TemplateError, TransactionDefinition, TransactionError, TransactionSynchronization, TransactionTemplate,
+    synchronization as tsm,
 };
-use dtx_sqlx::postgres::{PgDataSource, PgTransactionManager, transaction_manager};
+use dtx_sqlx::postgres::{TransactionalPool, manager_with_settings};
 use sqlx::{AssertSqlSafe, Row};
 
 type AppResult<T> = Result<T, TransactionError>;
 
 struct Fixture {
-    data_source: PgDataSource,
+    pool: TransactionalPool,
     table: String,
 }
 
@@ -23,17 +23,17 @@ impl Fixture {
             eprintln!("DTX_TEST_DATABASE_URL is not set; skipping {name}");
             return None;
         };
-        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await.unwrap();
+        let connections = sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await.unwrap();
         let table = format!("dtx_{name}");
-        sqlx::query(AssertSqlSafe(format!("drop table if exists {table}"))).execute(&pool).await.unwrap();
-        sqlx::query(AssertSqlSafe(format!("create table {table}(v text)"))).execute(&pool).await.unwrap();
-        Some(Self { data_source: PgDataSource::new(pool), table })
+        sqlx::query(AssertSqlSafe(format!("drop table if exists {table}"))).execute(&connections).await.unwrap();
+        sqlx::query(AssertSqlSafe(format!("create table {table}(v text)"))).execute(&connections).await.unwrap();
+        Some(Self { pool: TransactionalPool::new(connections), table })
     }
 
-    fn manager(&self, configure: impl FnOnce(&mut PgTransactionManager)) -> Arc<dyn PlatformTransactionManager> {
-        let mut manager = transaction_manager(self.data_source.clone());
-        configure(&mut manager);
-        Arc::new(manager)
+    fn manager(&self, configure: impl FnOnce(&mut ManagerSettings)) -> Arc<dyn PlatformTransactionManager> {
+        let mut settings = ManagerSettings { nested_transaction_allowed: true, ..ManagerSettings::default() };
+        configure(&mut settings);
+        Arc::new(manager_with_settings(self.pool.clone(), settings))
     }
 
     fn template(&self, propagation: Propagation) -> TransactionTemplate {
@@ -41,40 +41,40 @@ impl Fixture {
     }
 
     fn template_on(&self, manager: Arc<dyn PlatformTransactionManager>, propagation: Propagation) -> TransactionTemplate {
-        TransactionTemplate::with_definition(manager, &DefaultTransactionDefinition::with_propagation(propagation))
+        TransactionTemplate::with_definition(manager, TransactionDefinition::with_propagation(propagation))
     }
 
     async fn insert(&self, value: &str) -> AppResult<()> {
-        let mut connection = self.data_source.connection().await?;
+        let mut connection = self.pool.acquire().await?;
         sqlx::query(AssertSqlSafe(format!("insert into {} values($1)", self.table)))
             .bind(value.to_owned())
             .execute(&mut *connection)
             .await
-            .map_err(|error| TransactionError::Unexpected(error.into()))?;
+            .map_err(|error| TransactionError::Other(error.into()))?;
         Ok(())
     }
 
     async fn show(&self, setting: &'static str) -> AppResult<String> {
-        let mut connection = self.data_source.connection().await?;
+        let mut connection = self.pool.acquire().await?;
         let row = sqlx::query(AssertSqlSafe(format!("show {setting}")))
             .fetch_one(&mut *connection)
             .await
-            .map_err(|error| TransactionError::Unexpected(error.into()))?;
+            .map_err(|error| TransactionError::Other(error.into()))?;
         Ok(row.get(0))
     }
 
     async fn backend_pid(&self) -> AppResult<i32> {
-        let mut connection = self.data_source.connection().await?;
+        let mut connection = self.pool.acquire().await?;
         let row = sqlx::query("select pg_backend_pid()")
             .fetch_one(&mut *connection)
             .await
-            .map_err(|error| TransactionError::Unexpected(error.into()))?;
+            .map_err(|error| TransactionError::Other(error.into()))?;
         Ok(row.get(0))
     }
 
     async fn rows(&self) -> Vec<String> {
         sqlx::query(AssertSqlSafe(format!("select v from {} order by v", self.table)))
-            .fetch_all(self.data_source.pool())
+            .fetch_all(self.pool.inner())
             .await
             .unwrap()
             .iter()
@@ -83,17 +83,17 @@ impl Fixture {
     }
 
     fn bound(&self) -> bool {
-        Tsm::has_resource(self.data_source.resource_key())
+        tsm::has_resource(self.pool.resource_key())
     }
 }
 
 async fn scoped<F: Future>(future: F) -> F::Output {
-    Tsm::scope(async {
+    tsm::scope(async {
         let output = future.await;
-        assert!(Tsm::resource_keys().is_empty(), "resources must be unbound after the test");
-        assert!(!Tsm::is_synchronization_active(), "synchronization must be inactive after the test");
-        assert!(!Tsm::is_current_transaction_read_only());
-        assert!(!Tsm::is_actual_transaction_active());
+        assert!(tsm::resource_keys().is_empty(), "resources must be unbound after the test");
+        assert!(!tsm::is_synchronization_active(), "synchronization must be inactive after the test");
+        assert!(!tsm::is_current_transaction_read_only());
+        assert!(!tsm::is_actual_transaction_active());
         output
     })
     .await
@@ -163,10 +163,10 @@ async fn transaction_commit() {
         f.template(Propagation::Required)
             .execute(|status| async move {
                 assert!(f.bound());
-                assert!(Tsm::is_synchronization_active());
+                assert!(tsm::is_synchronization_active());
                 assert!(status.is_new_transaction());
-                assert!(Tsm::is_actual_transaction_active());
-                Tsm::register_synchronization(synchronization.clone())?;
+                assert!(tsm::is_actual_transaction_active());
+                tsm::register_synchronization(synchronization.clone())?;
                 f.insert("a").await
             })
             .await
@@ -191,12 +191,12 @@ async fn transaction_rollback_on_error() {
         let result: Result<(), _> = f
             .template(Propagation::Required)
             .execute(|_status| async move {
-                Tsm::register_synchronization(synchronization.clone())?;
+                tsm::register_synchronization(synchronization.clone())?;
                 f.insert("a").await?;
-                Err(TransactionError::Unexpected("Application exception".into()))
+                Err(TransactionError::Other("Application exception".into()))
             })
             .await;
-        assert!(matches!(result, Err(TemplateError::Application(TransactionError::Unexpected(_)))));
+        assert!(matches!(result, Err(TemplateError::Application(TransactionError::Other(_)))));
         assert!(f.rows().await.is_empty());
         assert_eq!(synchronization.calls(), ["before_completion", "after_completion(RolledBack)"]);
     })
@@ -207,14 +207,14 @@ async fn assert_participating_transaction_with_rollback_only(name: &str, fail_ea
     let Some(f) = Fixture::new(name).await else { return };
     let f = &f;
     scoped(async {
-        let manager = f.manager(|manager| manager.set_fail_early_on_global_rollback_only(fail_early));
+        let manager = f.manager(|settings| settings.fail_early_on_global_rollback_only = fail_early);
         let manager = &manager;
         assert!(!f.bound());
-        assert!(!Tsm::is_synchronization_active());
+        assert!(!tsm::is_synchronization_active());
 
-        let outer = manager.get_transaction(None).await.unwrap();
+        let outer = manager.transaction(None).await.unwrap();
         let synchronization = Arc::new(RecordingSynchronization::default());
-        Tsm::register_synchronization(synchronization.clone()).unwrap();
+        tsm::register_synchronization(synchronization.clone()).unwrap();
         assert!(outer.is_new_transaction());
         f.insert("a").await.unwrap();
 
@@ -227,12 +227,12 @@ async fn assert_participating_transaction_with_rollback_only(name: &str, fail_ea
                 template
                     .execute(|status2| async move {
                         assert!(f.bound());
-                        assert!(Tsm::is_synchronization_active());
+                        assert!(tsm::is_synchronization_active());
                         assert!(!status2.is_new_transaction());
                         status2.set_rollback_only()
                     })
                     .await
-                    .map_err(|error| TransactionError::Unexpected(error.to_string().into()))?;
+                    .map_err(|error| TransactionError::Other(error.to_string().into()))?;
                 assert!(!status1.is_new_transaction());
                 assert!(status1.is_rollback_only());
                 Ok::<_, TransactionError>(())
@@ -273,21 +273,21 @@ async fn participating_transaction_with_incompatible_isolation_level() {
     let Some(f) = Fixture::new("incompatible_isolation").await else { return };
     let f = &f;
     scoped(async {
-        let manager = f.manager(|manager| manager.set_validate_existing_transaction(true));
+        let manager = f.manager(|settings| settings.validate_existing_transaction = true);
         let manager = &manager;
         let result = f
             .template_on(manager.clone(), Propagation::Required)
             .execute(|_outer| async move {
                 f.insert("a").await?;
                 let mut inner = f.template_on(manager.clone(), Propagation::Required);
-                inner.definition_mut().isolation_level = Isolation::Serializable;
+                inner.definition_mut().isolation = Isolation::Serializable;
                 match inner.execute(|_| async move { Ok::<_, TransactionError>(()) }).await {
                     Err(TemplateError::Transaction(error)) => Err::<(), _>(error),
                     other => panic!("unexpected result: {other:?}"),
                 }
             })
             .await;
-        assert!(matches!(result, Err(TemplateError::Application(TransactionError::IllegalTransactionState(_)))));
+        assert!(matches!(result, Err(TemplateError::Application(TransactionError::InvalidTransactionState(_)))));
         assert!(f.rows().await.is_empty());
     })
     .await;
@@ -298,7 +298,7 @@ async fn participating_transaction_with_incompatible_read_only() {
     let Some(f) = Fixture::new("incompatible_read_only").await else { return };
     let f = &f;
     scoped(async {
-        let manager = f.manager(|manager| manager.set_validate_existing_transaction(true));
+        let manager = f.manager(|settings| settings.validate_existing_transaction = true);
         let manager = &manager;
         let mut outer = f.template_on(manager.clone(), Propagation::Required);
         outer.definition_mut().read_only = true;
@@ -310,7 +310,7 @@ async fn participating_transaction_with_incompatible_read_only() {
                 }
             })
             .await;
-        assert!(matches!(result, Err(TemplateError::Application(TransactionError::IllegalTransactionState(_)))));
+        assert!(matches!(result, Err(TemplateError::Application(TransactionError::InvalidTransactionState(_)))));
     })
     .await;
 }
@@ -328,13 +328,13 @@ async fn propagation_requires_new_with_existing_transaction() {
                 f.template(Propagation::RequiresNew)
                     .execute(|inner| async move {
                         assert!(inner.is_new_transaction());
-                        assert!(Tsm::is_actual_transaction_active());
+                        assert!(tsm::is_actual_transaction_active());
                         f.insert("inner").await?;
                         assert_ne!(f.backend_pid().await?, outer_pid);
                         inner.set_rollback_only()
                     })
                     .await
-                    .map_err(|error| TransactionError::Unexpected(error.to_string().into()))?;
+                    .map_err(|error| TransactionError::Other(error.to_string().into()))?;
                 assert!(!outer.is_rollback_only());
                 assert_eq!(f.backend_pid().await?, outer_pid);
                 Ok::<_, TransactionError>(())
@@ -359,15 +359,15 @@ async fn propagation_not_supported_with_existing_transaction() {
                         assert!(!f.bound());
                         assert!(!inner.has_transaction());
                         assert!(!inner.is_new_transaction());
-                        assert!(!Tsm::is_actual_transaction_active());
-                        assert!(Tsm::is_synchronization_active());
+                        assert!(!tsm::is_actual_transaction_active());
+                        assert!(tsm::is_synchronization_active());
                         Ok::<_, TransactionError>(())
                     })
                     .await
-                    .map_err(|error| TransactionError::Unexpected(error.to_string().into()))?;
+                    .map_err(|error| TransactionError::Other(error.to_string().into()))?;
                 assert!(f.bound());
                 assert!(outer.is_new_transaction());
-                assert!(Tsm::is_actual_transaction_active());
+                assert!(tsm::is_actual_transaction_active());
                 Ok::<_, TransactionError>(())
             })
             .await
@@ -392,7 +392,7 @@ async fn propagation_never_with_existing_transaction() {
                 }
             })
             .await;
-        assert!(matches!(result, Err(TemplateError::Application(TransactionError::IllegalTransactionState(_)))));
+        assert!(matches!(result, Err(TemplateError::Application(TransactionError::InvalidTransactionState(_)))));
         assert!(f.rows().await.is_empty());
     })
     .await;
@@ -405,7 +405,7 @@ async fn propagation_supports_and_requires_new_with_early_access() {
     scoped(async {
         f.template(Propagation::Supports)
             .execute(|outer| async move {
-                assert!(Tsm::is_synchronization_active());
+                assert!(tsm::is_synchronization_active());
                 assert!(!outer.has_transaction());
                 let first = f.backend_pid().await?;
                 assert_eq!(f.backend_pid().await?, first);
@@ -416,7 +416,7 @@ async fn propagation_supports_and_requires_new_with_early_access() {
                         f.insert("inner").await
                     })
                     .await
-                    .map_err(|error| TransactionError::Unexpected(error.to_string().into()))?;
+                    .map_err(|error| TransactionError::Other(error.to_string().into()))?;
                 assert_eq!(f.backend_pid().await?, first);
                 Ok::<_, TransactionError>(())
             })
@@ -433,12 +433,12 @@ async fn transaction_with_isolation_and_read_only() {
     let f = &f;
     scoped(async {
         let mut template = f.template(Propagation::Required);
-        template.definition_mut().isolation_level = Isolation::Serializable;
+        template.definition_mut().isolation = Isolation::Serializable;
         template.definition_mut().read_only = true;
         template
             .execute(|_status| async move {
-                assert!(Tsm::is_current_transaction_read_only());
-                assert_eq!(Tsm::current_transaction_isolation_level(), Some(Isolation::Serializable));
+                assert!(tsm::is_current_transaction_read_only());
+                assert_eq!(tsm::current_transaction_isolation_level(), Some(Isolation::Serializable));
                 assert_eq!(f.show("transaction_isolation").await?, "serializable");
                 assert_eq!(f.show("transaction_read_only").await?, "on");
                 Ok::<_, TransactionError>(())
@@ -461,7 +461,7 @@ async fn transaction_with_propagation_supports() {
             .execute(|status| async move {
                 assert!(!f.bound());
                 assert!(!status.is_new_transaction());
-                assert!(!Tsm::is_actual_transaction_active());
+                assert!(!tsm::is_actual_transaction_active());
                 Ok::<_, TransactionError>(())
             })
             .await
@@ -479,7 +479,7 @@ async fn existing_transaction_with_propagation_nested_and_rollback() {
         let synchronization = &synchronization;
         f.template(Propagation::Required)
             .execute(|outer| async move {
-                Tsm::register_synchronization(synchronization.clone())?;
+                tsm::register_synchronization(synchronization.clone())?;
                 f.insert("outer").await?;
                 f.template(Propagation::Nested)
                     .execute(|inner| async move {
@@ -490,7 +490,7 @@ async fn existing_transaction_with_propagation_nested_and_rollback() {
                         inner.set_rollback_only()
                     })
                     .await
-                    .map_err(|error| TransactionError::Unexpected(error.to_string().into()))?;
+                    .map_err(|error| TransactionError::Other(error.to_string().into()))?;
                 assert!(outer.is_new_transaction());
                 assert!(!outer.is_rollback_only());
                 f.insert("after").await
@@ -531,7 +531,7 @@ async fn existing_transaction_with_propagation_nested_and_required_rollback_only
                                 inner.set_rollback_only()
                             })
                             .await
-                            .map_err(|error| TransactionError::Unexpected(error.to_string().into()))
+                            .map_err(|error| TransactionError::Other(error.to_string().into()))
                     })
                     .await;
                 assert!(matches!(nested, Err(TemplateError::Transaction(TransactionError::UnexpectedRollback(_)))));
@@ -588,7 +588,7 @@ async fn transaction_with_timeout() {
     let f = &f;
     scoped(async {
         let mut template = f.template(Propagation::Required);
-        template.definition_mut().timeout = 1;
+        template.definition_mut().timeout = Some(Duration::from_secs(1));
         let result = template
             .execute(|_status| async move {
                 f.insert("a").await?;
@@ -596,7 +596,7 @@ async fn transaction_with_timeout() {
                 f.insert("b").await
             })
             .await;
-        assert!(matches!(result, Err(TemplateError::Application(TransactionError::TransactionTimedOut(_)))));
+        assert!(matches!(result, Err(TemplateError::Application(TransactionError::TimedOut(_)))));
         assert!(f.rows().await.is_empty());
     })
     .await;
@@ -620,7 +620,7 @@ async fn dropped_future_rolls_back_and_releases_task_state() {
         assert!(cancelled.is_err());
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(f.rows().await.is_empty());
-        Tsm::unbind_resource_if_possible(f.data_source.resource_key());
+        tsm::unbind_resource_if_possible(f.pool.resource_key());
     })
     .await;
 }

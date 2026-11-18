@@ -1,4 +1,4 @@
-pub const TIMEOUT_DEFAULT: i32 = -1;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Propagation {
@@ -22,79 +22,40 @@ pub enum Isolation {
     Serializable,
 }
 
-pub trait TransactionDefinition: Send + Sync {
-    fn propagation_behavior(&self) -> Propagation {
-        Propagation::Required
-    }
-    fn isolation_level(&self) -> Isolation {
-        Isolation::Default
-    }
-    fn timeout(&self) -> i32 {
-        TIMEOUT_DEFAULT
-    }
-    fn is_read_only(&self) -> bool {
-        false
-    }
-    fn name(&self) -> Option<&str> {
-        None
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StaticTransactionDefinition;
-
-impl TransactionDefinition for StaticTransactionDefinition {}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DefaultTransactionDefinition {
-    pub propagation_behavior: Propagation,
-    pub isolation_level: Isolation,
-    pub timeout: i32,
+pub struct TransactionDefinition {
+    pub propagation: Propagation,
+    pub isolation: Isolation,
+    pub timeout: Option<Duration>,
     pub read_only: bool,
     pub name: Option<String>,
 }
 
-impl DefaultTransactionDefinition {
+impl TransactionDefinition {
     pub fn new() -> Self {
-        Self { timeout: TIMEOUT_DEFAULT, ..Self::default_fields() }
+        Self::default()
     }
-    pub fn with_propagation(propagation_behavior: Propagation) -> Self {
-        Self { propagation_behavior, ..Self::new() }
+    pub fn with_propagation(propagation: Propagation) -> Self {
+        Self { propagation, ..Self::default() }
     }
-    pub fn from_definition(other: &dyn TransactionDefinition) -> Self {
-        Self {
-            propagation_behavior: other.propagation_behavior(),
-            isolation_level: other.isolation_level(),
-            timeout: other.timeout(),
-            read_only: other.is_read_only(),
-            name: other.name().map(str::to_owned),
-        }
+    pub fn propagation(mut self, propagation: Propagation) -> Self {
+        self.propagation = propagation;
+        self
     }
-    fn default_fields() -> Self {
-        Self {
-            propagation_behavior: Propagation::Required,
-            isolation_level: Isolation::Default,
-            timeout: TIMEOUT_DEFAULT,
-            read_only: false,
-            name: None,
-        }
+    pub fn isolation(mut self, isolation: Isolation) -> Self {
+        self.isolation = isolation;
+        self
     }
-}
-
-impl TransactionDefinition for DefaultTransactionDefinition {
-    fn propagation_behavior(&self) -> Propagation {
-        self.propagation_behavior
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
     }
-    fn isolation_level(&self) -> Isolation {
-        self.isolation_level
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
     }
-    fn timeout(&self) -> i32 {
-        self.timeout
-    }
-    fn is_read_only(&self) -> bool {
-        self.read_only
-    }
-    fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 }

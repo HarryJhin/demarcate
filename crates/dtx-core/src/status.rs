@@ -6,7 +6,7 @@ use crate::BoxFuture;
 use crate::driver::TransactionDriver;
 use crate::error::TransactionError;
 use crate::manager::SuspendedResourcesHolder;
-use crate::synchronization::{TransactionSynchronizationManager, TransactionSynchronizationUtils};
+use crate::synchronization;
 
 pub type Savepoint = Arc<dyn Any + Send + Sync>;
 
@@ -27,7 +27,7 @@ pub trait TransactionExecution: Send + Sync {
         false
     }
     fn set_rollback_only(&self) -> Result<(), TransactionError> {
-        Err(TransactionError::IllegalState("setRollbackOnly not supported".into()))
+        Err(TransactionError::InvalidState("setRollbackOnly not supported".into()))
     }
     fn is_rollback_only(&self) -> bool {
         false
@@ -53,7 +53,7 @@ pub trait TransactionStatus: TransactionExecution + SavepointManager + Any {
     fn as_any(&self) -> &dyn Any;
 }
 
-pub struct DefaultTransactionStatus<D: TransactionDriver> {
+pub struct ManagedTransactionStatus<D: TransactionDriver> {
     driver: Arc<D>,
     transaction_name: Option<String>,
     transaction: Option<D::Transaction>,
@@ -67,7 +67,7 @@ pub struct DefaultTransactionStatus<D: TransactionDriver> {
     savepoint: Mutex<Option<Savepoint>>,
 }
 
-impl<D: TransactionDriver> DefaultTransactionStatus<D> {
+impl<D: TransactionDriver> ManagedTransactionStatus<D> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         driver: Arc<D>,
@@ -128,18 +128,18 @@ impl<D: TransactionDriver> DefaultTransactionStatus<D> {
 
     pub(crate) async fn create_and_hold_savepoint(&self) -> Result<(), TransactionError> {
         let savepoint = self.driver.create_savepoint(self.require_savepoint_transaction()?).await?;
-        TransactionSynchronizationUtils::trigger_savepoint(&savepoint).await?;
+        synchronization::trigger_savepoint(&savepoint).await?;
         self.set_savepoint(Some(savepoint));
         Ok(())
     }
 
     pub(crate) async fn rollback_to_held_savepoint(&self) -> Result<(), TransactionError> {
         let savepoint = self.held_savepoint().ok_or_else(|| {
-            TransactionError::TransactionUsage(
+            TransactionError::Usage(
                 "Cannot roll back to savepoint - no savepoint associated with current transaction".into(),
             )
         })?;
-        TransactionSynchronizationUtils::trigger_savepoint_rollback(&savepoint).await?;
+        synchronization::trigger_savepoint_rollback(&savepoint).await?;
         let transaction = self.require_savepoint_transaction()?;
         self.driver.rollback_to_savepoint(transaction, &savepoint).await?;
         self.driver.release_savepoint(transaction, &savepoint).await?;
@@ -149,7 +149,7 @@ impl<D: TransactionDriver> DefaultTransactionStatus<D> {
 
     pub(crate) async fn release_held_savepoint(&self) -> Result<(), TransactionError> {
         let savepoint = self.held_savepoint().ok_or_else(|| {
-            TransactionError::TransactionUsage(
+            TransactionError::Usage(
                 "Cannot release savepoint - no savepoint associated with current transaction".into(),
             )
         })?;
@@ -160,12 +160,12 @@ impl<D: TransactionDriver> DefaultTransactionStatus<D> {
 
     fn require_savepoint_transaction(&self) -> Result<&D::Transaction, TransactionError> {
         self.transaction.as_ref().ok_or_else(|| {
-            TransactionError::NestedTransactionNotSupported("Transaction object does not support savepoints".into())
+            TransactionError::NestedNotSupported("Transaction object does not support savepoints".into())
         })
     }
 }
 
-impl<D: TransactionDriver> TransactionExecution for DefaultTransactionStatus<D> {
+impl<D: TransactionDriver> TransactionExecution for ManagedTransactionStatus<D> {
     fn transaction_name(&self) -> String {
         self.transaction_name.clone().unwrap_or_default()
     }
@@ -183,7 +183,7 @@ impl<D: TransactionDriver> TransactionExecution for DefaultTransactionStatus<D> 
     }
     fn set_rollback_only(&self) -> Result<(), TransactionError> {
         if self.is_completed() {
-            return Err(TransactionError::IllegalState("Transaction completed".into()));
+            return Err(TransactionError::InvalidState("Transaction completed".into()));
         }
         self.rollback_only.store(true, Ordering::SeqCst);
         Ok(())
@@ -196,17 +196,17 @@ impl<D: TransactionDriver> TransactionExecution for DefaultTransactionStatus<D> 
     }
 }
 
-impl<D: TransactionDriver> SavepointManager for DefaultTransactionStatus<D> {
+impl<D: TransactionDriver> SavepointManager for ManagedTransactionStatus<D> {
     fn create_savepoint(&self) -> BoxFuture<'_, Result<Savepoint, TransactionError>> {
         Box::pin(async move {
             let savepoint = self.driver.create_savepoint(self.require_savepoint_transaction()?).await?;
-            TransactionSynchronizationUtils::trigger_savepoint(&savepoint).await?;
+            synchronization::trigger_savepoint(&savepoint).await?;
             Ok(savepoint)
         })
     }
     fn rollback_to_savepoint<'a>(&'a self, savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>> {
         Box::pin(async move {
-            TransactionSynchronizationUtils::trigger_savepoint_rollback(savepoint).await?;
+            synchronization::trigger_savepoint_rollback(savepoint).await?;
             self.driver.rollback_to_savepoint(self.require_savepoint_transaction()?, savepoint).await
         })
     }
@@ -215,7 +215,7 @@ impl<D: TransactionDriver> SavepointManager for DefaultTransactionStatus<D> {
     }
 }
 
-impl<D: TransactionDriver> TransactionStatus for DefaultTransactionStatus<D> {
+impl<D: TransactionDriver> TransactionStatus for ManagedTransactionStatus<D> {
     fn has_savepoint(&self) -> bool {
         self.held_savepoint().is_some()
     }
@@ -232,10 +232,10 @@ impl<D: TransactionDriver> TransactionStatus for DefaultTransactionStatus<D> {
     }
 }
 
-impl<D: TransactionDriver> Drop for DefaultTransactionStatus<D> {
+impl<D: TransactionDriver> Drop for ManagedTransactionStatus<D> {
     fn drop(&mut self) {
         if !self.is_completed() && self.new_synchronization {
-            TransactionSynchronizationManager::clear();
+            synchronization::clear();
         }
     }
 }

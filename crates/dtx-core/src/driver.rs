@@ -3,13 +3,13 @@ use std::sync::Arc;
 use crate::definition::TransactionDefinition;
 use crate::error::TransactionError;
 use crate::status::Savepoint;
-use crate::synchronization::{CompletionStatus, TransactionSynchronization, TransactionSynchronizationUtils};
+use crate::synchronization::{self, CompletionStatus, TransactionSynchronization};
 
 pub trait TransactionDriver: Send + Sync + 'static {
     type Transaction: Send + Sync + 'static;
     type Suspended: Send + 'static;
 
-    fn do_get_transaction(&self) -> Result<Self::Transaction, TransactionError>;
+    fn transaction(&self) -> Result<Self::Transaction, TransactionError>;
 
     fn is_existing_transaction(&self, _transaction: &Self::Transaction) -> bool {
         false
@@ -19,30 +19,30 @@ pub trait TransactionDriver: Send + Sync + 'static {
         true
     }
 
-    fn do_begin(
+    fn begin(
         &self,
         transaction: &Self::Transaction,
-        definition: &dyn TransactionDefinition,
+        definition: &TransactionDefinition,
     ) -> impl Future<Output = Result<(), TransactionError>> + Send;
 
-    fn do_suspend(
+    fn suspend(
         &self,
         _transaction: &Self::Transaction,
     ) -> impl Future<Output = Result<Self::Suspended, TransactionError>> + Send {
         async {
-            Err(TransactionError::TransactionSuspensionNotSupported(
+            Err(TransactionError::SuspensionNotSupported(
                 "Transaction manager does not support transaction suspension".into(),
             ))
         }
     }
 
-    fn do_resume(
+    fn resume(
         &self,
         _transaction: Option<&Self::Transaction>,
         _suspended: Self::Suspended,
     ) -> impl Future<Output = Result<(), TransactionError>> + Send {
         async {
-            Err(TransactionError::TransactionSuspensionNotSupported(
+            Err(TransactionError::SuspensionNotSupported(
                 "Transaction manager does not support transaction suspension".into(),
             ))
         }
@@ -59,13 +59,13 @@ pub trait TransactionDriver: Send + Sync + 'static {
         async { Ok(()) }
     }
 
-    fn do_commit(&self, transaction: &Self::Transaction) -> impl Future<Output = Result<(), TransactionError>> + Send;
+    fn commit(&self, transaction: &Self::Transaction) -> impl Future<Output = Result<(), TransactionError>> + Send;
 
-    fn do_rollback(&self, transaction: &Self::Transaction)
+    fn rollback(&self, transaction: &Self::Transaction)
     -> impl Future<Output = Result<(), TransactionError>> + Send;
 
-    fn do_set_rollback_only(&self, _transaction: &Self::Transaction) -> Result<(), TransactionError> {
-        Err(TransactionError::IllegalTransactionState(
+    fn set_rollback_only(&self, _transaction: &Self::Transaction) -> Result<(), TransactionError> {
+        Err(TransactionError::InvalidTransactionState(
             "Participating in existing transactions is not supported - when 'isExistingTransaction' \
              returns true, appropriate 'doSetRollbackOnly' behavior must be provided"
                 .into(),
@@ -78,13 +78,13 @@ pub trait TransactionDriver: Send + Sync + 'static {
         synchronizations: Vec<Arc<dyn TransactionSynchronization>>,
     ) -> impl Future<Output = Result<(), TransactionError>> + Send {
         async move {
-            TransactionSynchronizationUtils::invoke_after_completion(&synchronizations, CompletionStatus::Unknown)
+            synchronization::invoke_after_completion(&synchronizations, CompletionStatus::Unknown)
                 .await;
             Ok(())
         }
     }
 
-    fn do_cleanup_after_completion(&self, _transaction: &Self::Transaction) -> impl Future<Output = ()> + Send {
+    fn cleanup_after_completion(&self, _transaction: &Self::Transaction) -> impl Future<Output = ()> + Send {
         async {}
     }
 
@@ -101,7 +101,7 @@ pub trait TransactionDriver: Send + Sync + 'static {
         _transaction: &Self::Transaction,
     ) -> impl Future<Output = Result<Savepoint, TransactionError>> + Send {
         async {
-            Err(TransactionError::NestedTransactionNotSupported(
+            Err(TransactionError::NestedNotSupported(
                 "Transaction object does not support savepoints".into(),
             ))
         }
@@ -113,7 +113,7 @@ pub trait TransactionDriver: Send + Sync + 'static {
         _savepoint: &Savepoint,
     ) -> impl Future<Output = Result<(), TransactionError>> + Send {
         async {
-            Err(TransactionError::NestedTransactionNotSupported(
+            Err(TransactionError::NestedNotSupported(
                 "Transaction object does not support savepoints".into(),
             ))
         }
@@ -125,7 +125,7 @@ pub trait TransactionDriver: Send + Sync + 'static {
         _savepoint: &Savepoint,
     ) -> impl Future<Output = Result<(), TransactionError>> + Send {
         async {
-            Err(TransactionError::NestedTransactionNotSupported(
+            Err(TransactionError::NestedNotSupported(
                 "Transaction object does not support savepoints".into(),
             ))
         }
