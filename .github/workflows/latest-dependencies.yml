@@ -1,0 +1,41 @@
+name: latest dependencies
+
+on:
+  schedule:
+    - cron: "0 21 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: newest dependency versions
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'HarryJhin' }}
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DEMARCATE_TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - name: ignore the lockfile and resolve every dependency to its newest version
+        run: cargo update
+      - run: cargo test --workspace --all-features -- --include-ignored
+      - run: cargo test --manifest-path examples/axum-orders/Cargo.toml -- --include-ignored
+      - run: cargo run --manifest-path examples/quickstart/Cargo.toml --features sqlx-default
+        env:
+          DATABASE_URL: ${{ env.DEMARCATE_TEST_DATABASE_URL }}

@@ -40,7 +40,8 @@ limit.
 ```sh
 docker run --rm -d --name orders-db -e POSTGRES_PASSWORD=orders -p 5432:5432 postgres:18
 until docker exec orders-db pg_isready -q -h 127.0.0.1; do sleep 1; done
-DATABASE_URL=postgres://postgres:orders@localhost/postgres cargo run -p demarcate-example-axum-orders
+DATABASE_URL=postgres://postgres:orders@localhost/postgres \
+  cargo run --manifest-path examples/axum-orders/Cargo.toml
 ```
 
 The server runs the migrations on start. They create the tables, two
@@ -70,7 +71,7 @@ orders, the one that was rolled back included.
 
 ```sh
 DEMARCATE_TEST_DATABASE_URL=postgres://postgres:orders@localhost/postgres \
-  cargo test -p demarcate-example-axum-orders -- --include-ignored
+  cargo test --manifest-path examples/axum-orders/Cargo.toml -- --include-ignored
 ```
 
 The tests add products, coupons and orders of their own and leave them in

@@ -15,4 +15,4 @@ demarcate-core = { path = "../demarcate-core", version = "0.1.0" }
 tracing = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "time"] }

@@ -6,6 +6,8 @@ rust-version = "1.94"
 license = "Apache-2.0"
 publish = false
 
+[workspace]
+
 [dependencies]
 # In your own project, use the dependency line of the README of the repository.
 demarcate = { path = "../../crates/demarcate", version = "0.1", features = ["sqlx-postgres"] }
