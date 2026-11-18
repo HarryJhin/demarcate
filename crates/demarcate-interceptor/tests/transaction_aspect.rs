@@ -210,3 +210,35 @@ fn determine_transaction_manager_without_any_manager() {
     let error = registry.determine_transaction_manager(&TransactionAttribute::new()).err().unwrap();
     assert!(error.to_string().contains("set_default"));
 }
+
+#[tokio::test]
+async fn rollback_publishes_method_rollback_event() {
+    let seen: Arc<std::sync::Mutex<Vec<(String, &'static str)>>> = Arc::default();
+    let sink = seen.clone();
+    demarcate_interceptor::registry().add_rollback_listener(move |event| {
+        if event.method == "test::publishes_rollback" {
+            sink.lock().unwrap().push((event.method.clone(), event.failure));
+        }
+    });
+    let tm = CallCountingTransactionManager::new();
+    let result = invoke_with_manager(tm.clone(), TransactionAttribute::new(), "test::publishes_rollback", async {
+        Err::<(), _>(AppError::Business("expected"))
+    })
+    .await;
+    assert!(result.is_err());
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].1.ends_with("AppError"));
+    }
+
+    let committed = invoke_with_manager(
+        tm.clone(),
+        TransactionAttribute::new().rule(RollbackRule::no_rollback_for::<AppError>()),
+        "test::publishes_rollback",
+        async { Err::<(), _>(AppError::Business("expected")) },
+    )
+    .await;
+    assert!(committed.is_err());
+    assert_eq!(seen.lock().unwrap().len(), 1, "no event when the transaction commits");
+}

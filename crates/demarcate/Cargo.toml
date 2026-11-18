@@ -7,6 +7,7 @@ publish.workspace = true
 [features]
 default = []
 sqlx-postgres = ["dep:demarcate-sqlx", "demarcate-sqlx/postgres"]
+sqlx-macros = ["demarcate-sqlx?/macros"]
 
 [dependencies]
 demarcate-core = { path = "../demarcate-core" }

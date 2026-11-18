@@ -7,9 +7,12 @@ publish.workspace = true
 [features]
 default = ["postgres"]
 postgres = ["sqlx/postgres"]
+macros = ["sqlx/macros"]
 
 [dependencies]
 demarcate-core = { path = "../demarcate-core" }
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

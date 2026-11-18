@@ -1,17 +1,31 @@
-use std::any::{TypeId, type_name};
+use std::any::{Any, TypeId, type_name};
+use std::fmt;
+use std::sync::Arc;
 
 use demarcate_core::TransactionDefinition;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+type Predicate = Arc<dyn Fn(&dyn Any) -> bool + Send + Sync>;
+
+#[derive(Clone)]
 enum Matcher {
     Type { id: TypeId, name: &'static str },
     Pattern(String),
+    Predicate { name: &'static str, test: Predicate },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RollbackRule {
     matcher: Matcher,
     rollback: bool,
+}
+
+impl fmt::Debug for RollbackRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RollbackRule")
+            .field("exception_pattern", &self.exception_pattern())
+            .field("rollback", &self.rollback)
+            .finish()
+    }
 }
 
 impl RollbackRule {
@@ -31,6 +45,19 @@ impl RollbackRule {
         Self::pattern(pattern.into(), false)
     }
 
+    pub fn rollback_if<E: 'static>(test: impl Fn(&E) -> bool + Send + Sync + 'static) -> Self {
+        Self::predicate(test, true)
+    }
+
+    pub fn no_rollback_if<E: 'static>(test: impl Fn(&E) -> bool + Send + Sync + 'static) -> Self {
+        Self::predicate(test, false)
+    }
+
+    fn predicate<E: 'static>(test: impl Fn(&E) -> bool + Send + Sync + 'static, rollback: bool) -> Self {
+        let test: Predicate = Arc::new(move |error| error.downcast_ref::<E>().is_some_and(&test));
+        Self { matcher: Matcher::Predicate { name: type_name::<E>(), test }, rollback }
+    }
+
     fn pattern(pattern: String, rollback: bool) -> Self {
         assert!(!pattern.trim().is_empty(), "'exceptionPattern' cannot be null or empty");
         Self { matcher: Matcher::Pattern(pattern), rollback }
@@ -42,25 +69,30 @@ impl RollbackRule {
 
     pub fn exception_pattern(&self) -> &str {
         match &self.matcher {
-            Matcher::Type { name, .. } => name,
+            Matcher::Type { name, .. } | Matcher::Predicate { name, .. } => name,
             Matcher::Pattern(pattern) => pattern,
         }
     }
 
     pub fn depth_of<E: 'static>(&self) -> i32 {
-        self.depth(TypeId::of::<E>(), type_name::<E>())
+        self.depth(None, TypeId::of::<E>(), type_name::<E>())
     }
 
-    pub fn depth(&self, error_type: TypeId, error_type_name: &str) -> i32 {
+    pub fn depth_of_value<E: 'static>(&self, error: &E) -> i32 {
+        self.depth(Some(error), TypeId::of::<E>(), type_name::<E>())
+    }
+
+    pub fn depth(&self, error: Option<&dyn Any>, error_type: TypeId, error_type_name: &str) -> i32 {
         let matched = match &self.matcher {
             Matcher::Type { id, .. } => *id == error_type,
             Matcher::Pattern(pattern) => error_type_name.contains(pattern.as_str()),
+            Matcher::Predicate { test, .. } => error.is_some_and(|error| test(error)),
         };
         if matched { 0 } else { -1 }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct TransactionAttribute {
     pub definition: TransactionDefinition,
     pub rollback_rules: Vec<RollbackRule>,
@@ -99,14 +131,18 @@ impl TransactionAttribute {
     }
 
     pub fn rollback_on<E: 'static>(&self) -> bool {
-        self.rollback_on_type(TypeId::of::<E>(), type_name::<E>())
+        self.rollback_on_type(None, TypeId::of::<E>(), type_name::<E>())
     }
 
-    pub fn rollback_on_type(&self, error_type: TypeId, error_type_name: &str) -> bool {
+    pub fn rollback_on_value<E: 'static>(&self, error: &E) -> bool {
+        self.rollback_on_type(Some(error), TypeId::of::<E>(), type_name::<E>())
+    }
+
+    pub fn rollback_on_type(&self, error: Option<&dyn Any>, error_type: TypeId, error_type_name: &str) -> bool {
         let mut winner: Option<&RollbackRule> = None;
         let mut deepest = i32::MAX;
         for rule in &self.rollback_rules {
-            let depth = rule.depth(error_type, error_type_name);
+            let depth = rule.depth(error, error_type, error_type_name);
             if depth >= 0 && depth < deepest {
                 deepest = depth;
                 winner = Some(rule);
@@ -114,4 +150,15 @@ impl TransactionAttribute {
         }
         winner.is_none_or(RollbackRule::is_rollback)
     }
+}
+
+pub fn error_chain_contains<T: std::error::Error + 'static>(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error.is::<T>() {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }

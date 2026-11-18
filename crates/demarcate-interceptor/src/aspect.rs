@@ -1,4 +1,4 @@
-use std::any::{TypeId, type_name};
+use std::any::{Any, TypeId, type_name};
 use std::cell::RefCell;
 use std::panic::resume_unwind;
 use std::pin::Pin;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use demarcate_core::{CatchUnwind, PlatformTransactionManager, TransactionError, TransactionStatus, synchronization};
 
 use crate::attribute::TransactionAttribute;
-use crate::registry::registry;
+use crate::registry::{MethodRollbackEvent, registry};
 
 pub struct TransactionInfo {
     pub attribute: TransactionAttribute,
@@ -95,10 +95,9 @@ where
     }
 
     let status = manager.transaction(Some(&attribute.definition)).await?;
-    let rollback = attribute.rollback_on_type(TypeId::of::<E>(), type_name::<E>());
     let info = Arc::new(TransactionInfo { attribute, joinpoint_identification, status: status.clone() });
     INFO.with(|stack| stack.borrow_mut().push(info.clone()));
-    let restore = Restore(info);
+    let restore = Restore(info.clone());
 
     let outcome = CatchUnwind::boxed(invocation).await;
 
@@ -111,7 +110,17 @@ where
             resume_unwind(panic)
         }
         Ok(Err(application)) => {
+            let rollback = info.attribute.rollback_on_type(
+                Some(&application as &dyn Any),
+                TypeId::of::<E>(),
+                type_name::<E>(),
+            );
             let completed = if rollback {
+                registry().publish_rollback(&MethodRollbackEvent {
+                    method: info.joinpoint_identification.clone(),
+                    failure: type_name::<E>(),
+                    transaction: status.clone(),
+                });
                 manager.rollback(status.as_ref()).await
             } else {
                 manager.commit(status.as_ref()).await

@@ -124,3 +124,93 @@ async fn unknown_transaction_manager_is_reported_before_the_body_runs() {
         other => panic!("unexpected result: {other:?}"),
     }
 }
+
+fn is_warning(error: &AppError) -> bool {
+    matches!(error, AppError::Business("warning"))
+}
+
+#[transactional(transaction_manager = "macro-predicate", no_rollback_if = is_warning)]
+async fn fails_with(message: &'static str) -> Result<(), AppError> {
+    Err(AppError::Business(message))
+}
+
+#[tokio::test]
+async fn with_rollback_decided_by_the_error_value() {
+    let tm = CallCountingTransactionManager::new();
+    registry().register("macro-predicate", tm.clone());
+    assert!(fails_with("warning").await.is_err());
+    assert_eq!(tm.counts(), [1, 1, 0]);
+    assert!(fails_with("failed").await.is_err());
+    assert_eq!(tm.counts(), [2, 1, 1]);
+}
+
+#[transactional(transaction_manager = "macro-read-only", read_only = true)]
+async fn read_only_true() -> Result<(), AppError> {
+    Ok(())
+}
+
+#[transactional(transaction_manager = "macro-read-only", read_only = false)]
+async fn read_only_false() -> Result<(), AppError> {
+    Ok(())
+}
+
+#[transactional(transaction_manager = "macro-read-only")]
+async fn read_only_omitted() -> Result<(), AppError> {
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_forms() {
+    let tm = CallCountingTransactionManager::new();
+    registry().register("macro-read-only", tm.clone());
+    read_only_true().await.unwrap();
+    assert!(tm.definition().read_only);
+    read_only_false().await.unwrap();
+    assert!(!tm.definition().read_only);
+    read_only_omitted().await.unwrap();
+    assert!(!tm.definition().read_only);
+}
+
+struct Ledger;
+
+#[transactional(transaction_manager = "macro-impl", read_only)]
+impl Ledger {
+    pub async fn balance(&self) -> Result<u32, AppError> {
+        Ok(7)
+    }
+
+    #[transactional(transaction_manager = "macro-impl", propagation = RequiresNew)]
+    pub async fn transfer(&self) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    async fn private_helper(&self) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    pub fn name(&self) -> &'static str {
+        "ledger"
+    }
+}
+
+#[tokio::test]
+async fn type_level_declaration_applies_to_public_async_methods() {
+    let tm = CallCountingTransactionManager::new();
+    registry().register("macro-impl", tm.clone());
+    let ledger = Ledger;
+
+    assert_eq!(ledger.balance().await.unwrap(), 7);
+    assert_eq!(tm.counts(), [1, 1, 0]);
+    let definition = tm.definition();
+    assert!(definition.read_only);
+    assert_eq!(definition.name.as_deref(), Some("transactional_macro::Ledger::balance"));
+
+    ledger.transfer().await.unwrap();
+    let definition = tm.definition();
+    assert_eq!(definition.propagation, Propagation::RequiresNew, "the method-level declaration wins");
+    assert!(!definition.read_only);
+
+    ledger.private_helper().await.unwrap();
+    assert_eq!(ledger.name(), "ledger");
+    assert_eq!(tm.counts(), [2, 2, 0], "private and non-async methods are not transactional");
+}

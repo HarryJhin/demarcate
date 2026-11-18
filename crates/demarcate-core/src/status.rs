@@ -53,6 +53,73 @@ pub trait TransactionStatus: TransactionExecution + SavepointManager + Any {
     fn as_any(&self) -> &dyn Any;
 }
 
+pub struct SimpleTransactionStatus {
+    new_transaction: bool,
+    rollback_only: AtomicBool,
+    completed: AtomicBool,
+}
+
+impl SimpleTransactionStatus {
+    pub fn new() -> Self {
+        Self::with_new_transaction(true)
+    }
+
+    pub fn with_new_transaction(new_transaction: bool) -> Self {
+        Self { new_transaction, rollback_only: AtomicBool::new(false), completed: AtomicBool::new(false) }
+    }
+
+    pub fn set_completed(&self) {
+        self.completed.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Default for SimpleTransactionStatus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TransactionExecution for SimpleTransactionStatus {
+    fn is_new_transaction(&self) -> bool {
+        self.new_transaction
+    }
+    fn set_rollback_only(&self) -> Result<(), TransactionError> {
+        if self.is_completed() {
+            return Err(TransactionError::InvalidState("Transaction completed".into()));
+        }
+        self.rollback_only.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    fn is_rollback_only(&self) -> bool {
+        self.rollback_only.load(Ordering::SeqCst)
+    }
+    fn is_completed(&self) -> bool {
+        self.completed.load(Ordering::SeqCst)
+    }
+}
+
+impl SavepointManager for SimpleTransactionStatus {
+    fn create_savepoint(&self) -> BoxFuture<'_, Result<Savepoint, TransactionError>> {
+        Box::pin(async { Err(not_supported()) })
+    }
+    fn rollback_to_savepoint<'a>(&'a self, _savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>> {
+        Box::pin(async { Err(not_supported()) })
+    }
+    fn release_savepoint<'a>(&'a self, _savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>> {
+        Box::pin(async { Err(not_supported()) })
+    }
+}
+
+impl TransactionStatus for SimpleTransactionStatus {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+fn not_supported() -> TransactionError {
+    TransactionError::NestedNotSupported("This transaction does not support savepoints".into())
+}
+
 pub struct ManagedTransactionStatus<D: TransactionDriver> {
     driver: Arc<D>,
     transaction_name: Option<String>,

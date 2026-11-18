@@ -30,10 +30,9 @@ struct Repository {
 
 impl Repository {
     async fn insert(&self, value: &str) -> Result<(), ServiceError> {
-        let mut connection = self.pool.acquire().await?;
         sqlx::query(AssertSqlSafe(format!("insert into {} values($1)", self.table)))
             .bind(value.to_owned())
-            .execute(&mut *connection)
+            .execute(&self.pool)
             .await?;
         Ok(())
     }
@@ -48,8 +47,7 @@ impl Repository {
     }
 
     async fn read_only_setting(&self) -> Result<String, ServiceError> {
-        let mut connection = self.pool.acquire().await?;
-        Ok(sqlx::query("show transaction_read_only").fetch_one(&mut *connection).await?.get(0))
+        Ok(sqlx::query("show transaction_read_only").fetch_one(&self.pool).await?.get(0))
     }
 
     async fn rows(&self) -> Vec<String> {

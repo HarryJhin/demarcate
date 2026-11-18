@@ -2,7 +2,10 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::punctuated::Punctuated;
-use syn::{Ident, ItemFn, LitBool, LitInt, LitStr, Token, Type, bracketed, parse_macro_input};
+use syn::{
+    Block, Expr, Ident, ImplItem, Item, ItemFn, ItemImpl, LitBool, LitInt, LitStr, Signature, Token, Type, bracketed,
+    parse_macro_input,
+};
 
 #[derive(Default)]
 struct Arguments {
@@ -14,6 +17,8 @@ struct Arguments {
     no_rollback_for: Vec<Type>,
     rollback_for_name: Vec<LitStr>,
     no_rollback_for_name: Vec<LitStr>,
+    rollback_if: Vec<Expr>,
+    no_rollback_if: Vec<Expr>,
     transaction_manager: Option<LitStr>,
     label: Vec<LitStr>,
 }
@@ -44,13 +49,15 @@ impl Arguments {
             "no_rollback_for" => self.no_rollback_for = list(&meta)?,
             "rollback_for_name" => self.rollback_for_name = list(&meta)?,
             "no_rollback_for_name" => self.no_rollback_for_name = list(&meta)?,
+            "rollback_if" => self.rollback_if = list(&meta)?,
+            "no_rollback_if" => self.no_rollback_if = list(&meta)?,
             "transaction_manager" => self.transaction_manager = Some(meta.value()?.parse()?),
             "label" => self.label = list(&meta)?,
             _ => {
                 return Err(meta.error(
                     "unknown #[transactional] attribute; expected one of: propagation, isolation, timeout, \
                      read_only, rollback_for, no_rollback_for, rollback_for_name, no_rollback_for_name, \
-                     transaction_manager, label",
+                     rollback_if, no_rollback_if, transaction_manager, label",
                 ));
             }
         }
@@ -93,6 +100,14 @@ impl Arguments {
                 attribute.rollback_rules.push(::demarcate::RollbackRule::no_rollback_for_name(#pattern));
             });
         }
+        for test in &self.rollback_if {
+            statements.push(quote! { attribute.rollback_rules.push(::demarcate::RollbackRule::rollback_if(#test)); });
+        }
+        for test in &self.no_rollback_if {
+            statements.push(quote! {
+                attribute.rollback_rules.push(::demarcate::RollbackRule::no_rollback_if(#test));
+            });
+        }
         if let Some(qualifier) = &self.transaction_manager {
             statements.push(quote! {
                 attribute.qualifier = ::core::option::Option::Some(::std::string::String::from(#qualifier));
@@ -109,35 +124,73 @@ impl Arguments {
     }
 }
 
-#[proc_macro_attribute]
-pub fn transactional(arguments: TokenStream, item: TokenStream) -> TokenStream {
-    let mut parsed = Arguments::default();
-    let parser = syn::meta::parser(|meta| parsed.parse(meta));
-    parse_macro_input!(arguments with parser);
-    let function = parse_macro_input!(item as ItemFn);
-
-    if function.sig.asyncness.is_none() {
-        return syn::Error::new_spanned(
-            function.sig.fn_token,
-            "#[transactional] requires an `async fn` that returns `Result<T, E>` where `E: From<TransactionError>`",
-        )
-        .to_compile_error()
-        .into();
-    }
-
-    let ItemFn { attrs, vis, sig, block } = function;
+fn wrap(attribute: &TokenStream2, owner: Option<&Type>, sig: &Signature, block: &Block) -> TokenStream2 {
     let name = &sig.ident;
-    let attribute = parsed.attribute();
+    let identification = match owner {
+        Some(owner) => quote! {
+            ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#owner), "::", ::core::stringify!(#name))
+        },
+        None => quote! { ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)) },
+    };
     quote! {
-        #(#attrs)*
-        #vis #sig {
+        {
             ::demarcate::invoke_within_transaction(
                 #attribute,
-                ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
+                #identification,
                 ::std::boxed::Box::pin(async move #block),
             )
             .await
         }
     }
+}
+
+fn not_async(sig: &Signature) -> TokenStream {
+    syn::Error::new_spanned(
+        sig.fn_token,
+        "#[transactional] requires an `async fn` that returns `Result<T, E>` where `E: From<TransactionError>`",
+    )
+    .to_compile_error()
     .into()
+}
+
+fn has_transactional_attribute(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| attr.path().segments.last().is_some_and(|segment| segment.ident == "transactional"))
+}
+
+fn transactional_impl(attribute: &TokenStream2, mut item: ItemImpl) -> TokenStream {
+    let owner = (*item.self_ty).clone();
+    for member in &mut item.items {
+        let ImplItem::Fn(method) = member else { continue };
+        if method.sig.asyncness.is_none() || has_transactional_attribute(&method.attrs) {
+            continue;
+        }
+        if !matches!(method.vis, syn::Visibility::Public(_)) && item.trait_.is_none() {
+            continue;
+        }
+        let wrapped = wrap(attribute, Some(&owner), &method.sig, &method.block);
+        method.block = syn::parse2(wrapped).expect("generated block");
+    }
+    quote! { #item }.into()
+}
+
+#[proc_macro_attribute]
+pub fn transactional(arguments: TokenStream, item: TokenStream) -> TokenStream {
+    let mut parsed = Arguments::default();
+    let parser = syn::meta::parser(|meta| parsed.parse(meta));
+    parse_macro_input!(arguments with parser);
+    let attribute = parsed.attribute();
+
+    match parse_macro_input!(item as Item) {
+        Item::Impl(item) => transactional_impl(&attribute, item),
+        Item::Fn(ItemFn { attrs, vis, sig, block }) => {
+            if sig.asyncness.is_none() {
+                return not_async(&sig);
+            }
+            let body = wrap(&attribute, None, &sig, &block);
+            quote! { #(#attrs)* #vis #sig #body }.into()
+        }
+        other => syn::Error::new_spanned(other, "#[transactional] can be applied to an `async fn` or an `impl` block")
+            .to_compile_error()
+            .into(),
+    }
 }

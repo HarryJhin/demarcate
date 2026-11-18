@@ -56,6 +56,16 @@ impl TransactionTemplate {
         &self.transaction_manager
     }
 
+    pub async fn without_transaction<T, E, F, Fut>(action: F) -> Result<T, E>
+    where
+        F: FnOnce(Arc<dyn TransactionStatus>) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let status: Arc<dyn TransactionStatus> =
+            Arc::new(crate::status::SimpleTransactionStatus::with_new_transaction(false));
+        action(status).await
+    }
+
     pub async fn execute<T, E, F, Fut>(&self, action: F) -> Result<T, TemplateError<E>>
     where
         F: FnOnce(Arc<dyn TransactionStatus>) -> Fut,

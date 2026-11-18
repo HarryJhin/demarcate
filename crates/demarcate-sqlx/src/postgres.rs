@@ -150,7 +150,7 @@ impl ResourceHolder for ConnectionHolder {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TransactionalPool {
     inner: PgPool,
     key: ResourceKey,
@@ -218,6 +218,81 @@ impl TransactionalPool {
         let guard = holder.lock()?;
         holder.requested();
         Ok(TransactionalConnection(Handle::Held { guard, holder }))
+    }
+}
+
+fn into_sqlx(error: TransactionError) -> sqlx::Error {
+    sqlx::Error::Configuration(Box::new(error))
+}
+
+impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
+    type Database = Postgres;
+
+    fn fetch_many<'e, 'q: 'e, E>(
+        self,
+        query: E,
+    ) -> futures_core::stream::BoxStream<
+        'e,
+        Result<sqlx::Either<sqlx::postgres::PgQueryResult, sqlx::postgres::PgRow>, sqlx::Error>,
+    >
+    where
+        'p: 'e,
+        E: 'q + sqlx::Execute<'q, Postgres>,
+    {
+        use futures_util::{StreamExt, TryStreamExt};
+        let pool = self.clone();
+        futures_util::stream::once(async move {
+            let mut connection = pool.acquire().await.map_err(into_sqlx)?;
+            let items: Vec<_> = (&mut *connection).fetch_many(query).try_collect().await?;
+            Ok::<_, sqlx::Error>(futures_util::stream::iter(items.into_iter().map(Ok)))
+        })
+        .try_flatten()
+        .boxed()
+    }
+
+    fn fetch_optional<'e, 'q: 'e, E>(
+        self,
+        query: E,
+    ) -> futures_core::future::BoxFuture<'e, Result<Option<sqlx::postgres::PgRow>, sqlx::Error>>
+    where
+        'p: 'e,
+        E: 'q + sqlx::Execute<'q, Postgres>,
+    {
+        let pool = self.clone();
+        Box::pin(async move {
+            let mut connection = pool.acquire().await.map_err(into_sqlx)?;
+            (&mut *connection).fetch_optional(query).await
+        })
+    }
+
+    fn prepare_with<'e>(
+        self,
+        sql: sqlx::SqlStr,
+        parameters: &'e [sqlx::postgres::PgTypeInfo],
+    ) -> futures_core::future::BoxFuture<'e, Result<sqlx::postgres::PgStatement, sqlx::Error>>
+    where
+        'p: 'e,
+    {
+        let pool = self.clone();
+        Box::pin(async move {
+            let mut connection = pool.acquire().await.map_err(into_sqlx)?;
+            (&mut *connection).prepare_with(sql, parameters).await
+        })
+    }
+
+    #[cfg(feature = "macros")]
+    fn describe<'e>(
+        self,
+        sql: sqlx::SqlStr,
+    ) -> futures_core::future::BoxFuture<'e, Result<sqlx::Describe<Postgres>, sqlx::Error>>
+    where
+        'p: 'e,
+    {
+        let pool = self.clone();
+        Box::pin(async move {
+            let mut connection = pool.acquire().await.map_err(into_sqlx)?;
+            (&mut *connection).describe(sql).await
+        })
     }
 }
 
