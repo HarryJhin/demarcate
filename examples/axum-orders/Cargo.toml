@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 # In your own project, use the dependency line of the README of the repository.
-demarcate = { path = "../../crates/demarcate", version = "0.1", features = ["sqlx-postgres"] }
+demarcate = { path = "../../crates/demarcate", features = ["sqlx-postgres"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "migrate"] }
