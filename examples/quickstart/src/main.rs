@@ -43,12 +43,12 @@ impl Orders {
 
     #[transactional(propagation = RequiresNew)]
     async fn audit(&self, event: &str) -> Result<(), Error> {
-        sqlx::query("insert into audit values($1)").bind(event.to_owned()).execute(&self.pool).await?;
+        sqlx::query("insert into quickstart_audit values($1)").bind(event.to_owned()).execute(&self.pool).await?;
         Ok(())
     }
 
     async fn insert(&self, item: &str) -> Result<(), Error> {
-        sqlx::query("insert into orders values($1)").bind(item.to_owned()).execute(&self.pool).await?;
+        sqlx::query("insert into quickstart_orders values($1)").bind(item.to_owned()).execute(&self.pool).await?;
         Ok(())
     }
 }
@@ -57,8 +57,8 @@ impl Orders {
 async fn main() -> Result<(), Error> {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pg_pool = sqlx::PgPool::connect(&url).await?;
-    sqlx::query("create table if not exists orders(item text)").execute(&pg_pool).await?;
-    sqlx::query("create table if not exists audit(event text)").execute(&pg_pool).await?;
+    sqlx::query("create table if not exists quickstart_orders(item text)").execute(&pg_pool).await?;
+    sqlx::query("create table if not exists quickstart_audit(event text)").execute(&pg_pool).await?;
 
     let pool = TransactionalPool::new(pg_pool);
     demarcate::registry().set_default(Arc::new(manager(pool.clone())));

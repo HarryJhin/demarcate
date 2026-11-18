@@ -6,6 +6,7 @@ members = [
     "crates/demarcate-interceptor",
     "crates/demarcate-macros",
     "crates/demarcate-sqlx",
+    "examples/axum-orders",
 ]
 
 [workspace.package]

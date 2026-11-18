@@ -40,10 +40,10 @@ jobs:
         if: matrix.toolchain == 'stable'
       - run: cargo test --workspace -- --include-ignored
       - run: cargo test --workspace --all-features --no-run
-      - name: build a consumer outside the workspace without sqlx default features
-        run: cargo clippy --manifest-path ci/consumer/Cargo.toml -- -D warnings
-      - name: build and run the same consumer with sqlx default features
-        run: cargo run --manifest-path ci/consumer/Cargo.toml --features sqlx-default
+      - name: build the quickstart example outside the workspace without sqlx default features
+        run: cargo clippy --manifest-path examples/quickstart/Cargo.toml -- -D warnings
+      - name: build and run the quickstart example with sqlx default features
+        run: cargo run --manifest-path examples/quickstart/Cargo.toml --features sqlx-default
         env:
           DATABASE_URL: ${{ env.DEMARCATE_TEST_DATABASE_URL }}
       - run: cargo doc --workspace --no-deps --all-features

@@ -1,5 +1,5 @@
 [package]
-name = "demarcate-consumer-check"
+name = "demarcate-example-quickstart"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -10,6 +10,7 @@ publish = false
 sqlx-default = ["sqlx/default"]
 
 [dependencies]
-demarcate = { path = "../../crates/demarcate", features = ["sqlx-postgres"] }
+# In your own project, remove `path`.
+demarcate = { path = "../../crates/demarcate", version = "0.1", features = ["sqlx-postgres"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
