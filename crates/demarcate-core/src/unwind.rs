@@ -2,6 +2,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+#[doc(hidden)]
 pub struct CatchUnwind<F>(Pin<Box<F>>);
 
 impl<F: Future> CatchUnwind<F> {

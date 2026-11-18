@@ -32,6 +32,9 @@ impl TransactionError {
 impl fmt::Display for TransactionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CannotCreateTransaction { message, source: Some(source) }
+            | Self::CannotGetConnection { message, source: Some(source) }
+            | Self::System { message, source: Some(source), .. } => write!(f, "{message}: {source}"),
             Self::CannotCreateTransaction { message, .. }
             | Self::CannotGetConnection { message, .. }
             | Self::InvalidTransactionState(message)

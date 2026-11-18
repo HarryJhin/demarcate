@@ -50,6 +50,7 @@ pub trait TransactionStatus: TransactionExecution + SavepointManager + Any {
     fn flush(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async { Ok(()) })
     }
+    #[doc(hidden)]
     fn boundary(&self) -> Option<u64> {
         None
     }

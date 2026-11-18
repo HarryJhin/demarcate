@@ -16,6 +16,7 @@ pub const CONNECTION_SYNCHRONIZATION_ORDER: i32 = 1000;
 
 static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
 
+#[doc(hidden)]
 pub enum Conn {
     Pooled(PoolConnection<Postgres>),
     Transaction(Transaction<'static, Postgres>),
@@ -440,6 +441,7 @@ impl TransactionSynchronization for ConnectionSynchronization {
     }
 }
 
+#[doc(hidden)]
 pub struct PgTransactionObject {
     holder: Mutex<Option<Arc<ConnectionHolder>>>,
     new_connection_holder: AtomicBool,
@@ -464,7 +466,7 @@ impl PgTransactionObject {
             ));
         }
         self.holder().ok_or_else(|| {
-            TransactionError::Usage("Cannot create nested transaction when not exposing a JDBC transaction".into())
+            TransactionError::Usage("Cannot create a nested transaction when no database transaction is exposed".into())
         })
     }
 }
@@ -557,7 +559,7 @@ impl TransactionDriver for PgTransactionDriver {
         let started =
             self.pool.inner.begin_with(AssertSqlSafe(begin_statement(definition))).await.map_err(|error| {
                 TransactionError::CannotCreateTransaction {
-                    message: "Could not open JDBC Connection for transaction".into(),
+                    message: "Could not open a database connection for the transaction".into(),
                     source: Some(error.into()),
                 }
             })?;
@@ -573,7 +575,7 @@ impl TransactionDriver for PgTransactionDriver {
             holder.release_connection().await;
             transaction.set_holder(None, false);
             return Err(TransactionError::CannotCreateTransaction {
-                message: "Could not open JDBC Connection for transaction".into(),
+                message: "Could not open a database connection for the transaction".into(),
                 source: Some(error.into()),
             });
         }
@@ -601,7 +603,7 @@ impl TransactionDriver for PgTransactionDriver {
         let connection = holder.lock()?.take();
         match connection {
             Some(Conn::Transaction(started)) => {
-                started.commit().await.map_err(|error| TransactionError::system("JDBC commit failed", error))
+                started.commit().await.map_err(|error| TransactionError::system("Commit failed", error))
             }
             Some(Conn::Pooled(_)) | None => Ok(()),
         }
@@ -613,7 +615,7 @@ impl TransactionDriver for PgTransactionDriver {
         let connection = holder.lock()?.take();
         match connection {
             Some(Conn::Transaction(started)) => {
-                started.rollback().await.map_err(|error| TransactionError::system("JDBC rollback failed", error))
+                started.rollback().await.map_err(|error| TransactionError::system("Rollback failed", error))
             }
             Some(Conn::Pooled(_)) | None => Ok(()),
         }
@@ -672,7 +674,7 @@ impl TransactionDriver for PgTransactionDriver {
         execute_on(&holder, format!("SAVEPOINT {name}")).await.map_err(|error| match error {
             SavepointError::State(error) => error,
             SavepointError::Sql(error) => TransactionError::CannotCreateTransaction {
-                message: "Could not create JDBC savepoint".into(),
+                message: "Could not create a savepoint".into(),
                 source: Some(error.into()),
             },
         })?;
@@ -688,7 +690,7 @@ impl TransactionDriver for PgTransactionDriver {
         let name = savepoint_name(savepoint)?;
         execute_on(&holder, format!("ROLLBACK TO SAVEPOINT {name}"))
             .await
-            .map_err(|error| error.into_system("Could not roll back to JDBC savepoint"))?;
+            .map_err(|error| error.into_system("Could not roll back to the savepoint"))?;
         holder.reset_rollback_only();
         Ok(())
     }
@@ -703,7 +705,7 @@ impl TransactionDriver for PgTransactionDriver {
         match execute_on(&holder, format!("RELEASE SAVEPOINT {name}")).await {
             Ok(()) => Ok(()),
             Err(SavepointError::Sql(error)) if release_failure_is_ignorable(&error) => Ok(()),
-            Err(error) => Err(error.into_system("Could not explicitly release JDBC savepoint")),
+            Err(error) => Err(error.into_system("Could not release the savepoint")),
         }
     }
 }

@@ -172,16 +172,19 @@ pub(crate) const CONCURRENT: &str = "A transactional call is already running on 
      context belongs to it, so this future can neither join its caller's transaction nor start one. Await the \
      two one after another, or run one of them in its own task with demarcate_core::synchronization::spawn";
 
+#[doc(hidden)]
 pub fn check_access() -> Result<(), TransactionError> {
     let concurrent = STATE.try_with(|state| foreign(&state.borrow())).unwrap_or(false);
     if concurrent { Err(TransactionError::InvalidState(CONCURRENT.into())) } else { Ok(()) }
 }
 
+#[doc(hidden)]
 pub struct BoundaryScope<F> {
     boundary: Option<u64>,
     future: std::pin::Pin<Box<F>>,
 }
 
+#[doc(hidden)]
 pub fn boundary_scope<F: Future>(boundary: Option<u64>, future: F) -> BoundaryScope<F> {
     if let Some(id) = boundary {
         let _ = STATE.try_with(|state| state.borrow_mut().polling.push(id));
@@ -259,6 +262,7 @@ where
     tokio::spawn(scope(future))
 }
 
+#[doc(hidden)]
 pub async fn ensure_scope<F: Future>(future: F) -> F::Output {
     if is_context_active() { future.await } else { scope(future).await }
 }

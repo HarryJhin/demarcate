@@ -199,7 +199,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
                 if !self.settings.nested_transaction_allowed {
                     return Err(TransactionError::NestedNotSupported(
                         "Transaction manager does not allow nested transactions by default - \
-                         specify 'nestedTransactionAllowed' property with value 'true'"
+                         set ManagerSettings::nested_transaction_allowed to true"
                             .into(),
                     ));
                 }
