@@ -190,22 +190,22 @@ impl Ledger {
         Ok(())
     }
 
-    #[transactional(skip)]
-    pub async fn outside(&self) -> Result<bool, AppError> {
-        Ok(demarcate::current_transaction_info().is_some())
-    }
-
     async fn aliased(&self) -> Fallible<bool> {
         Ok(demarcate::current_transaction_info().is_some())
     }
 
-    #[transactional(skip)]
-    pub async fn describe(&self) -> String {
-        "ledger".to_owned()
-    }
-
     pub fn name(&self) -> &'static str {
         "ledger"
+    }
+}
+
+impl Ledger {
+    pub async fn outside(&self) -> Result<bool, AppError> {
+        Ok(demarcate::current_transaction_info().is_some())
+    }
+
+    pub async fn describe(&self) -> String {
+        "ledger".to_owned()
     }
 }
 
@@ -229,10 +229,10 @@ async fn type_level_declaration_applies_to_public_async_methods() {
     ledger.private_helper().await.unwrap();
     assert_eq!(tm.counts(), [3, 3, 0], "visibility does not exclude a method");
 
-    assert!(!ledger.outside().await.unwrap(), "skip keeps a method outside the declaration");
+    assert!(!ledger.outside().await.unwrap(), "a method in another impl block is outside the declaration");
     assert_eq!(ledger.describe().await, "ledger");
     assert_eq!(ledger.name(), "ledger");
-    assert_eq!(tm.counts(), [3, 3, 0], "skipped and non-async methods are not transactional");
+    assert_eq!(tm.counts(), [3, 3, 0], "methods of another impl block and non-async methods are not transactional");
 
     assert!(ledger.aliased().await.unwrap(), "a Result behind a type alias is transactional");
     assert_eq!(tm.counts(), [4, 4, 0]);

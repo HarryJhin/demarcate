@@ -148,7 +148,7 @@ where
 #[diagnostic::on_unimplemented(
     message = "`#[transactional]` needs this function to return `Result<T, E>` where `E: From<demarcate::TransactionError>`, but it returns `{Self}`",
     label = "not a `Result` whose error converts from `TransactionError`",
-    note = "on an `impl` block `#[transactional]` applies to every `async fn`; mark a method that must run without a transaction with `#[transactional(skip)]`",
+    note = "on an `impl` block `#[transactional]` applies to every `async fn` in the block; move a method that is not transactional to a separate `impl` block without the attribute",
     note = "implement `From<demarcate::TransactionError>` for the error type so that a failure to begin, commit or roll back can be returned"
 )]
 pub trait TransactionalReturn {}
