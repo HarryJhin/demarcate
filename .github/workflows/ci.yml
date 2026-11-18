@@ -26,8 +26,34 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: demarcate
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -ptest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: test
+          MARIADB_DATABASE: demarcate
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       DEMARCATE_TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres
+      DEMARCATE_TEST_MYSQL_URL: mysql://root:test@localhost:3306/demarcate
+      DEMARCATE_TEST_MARIADB_URL: mysql://root:test@localhost:3307/demarcate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
@@ -40,6 +66,23 @@ jobs:
         if: matrix.toolchain == 'stable'
       - run: cargo test --workspace -- --include-ignored
       - run: cargo test --workspace --all-features --no-run
+      - name: build each driver alone
+        run: |
+          cargo check -p demarcate-sqlx --no-default-features --features postgres
+          cargo check -p demarcate-sqlx --no-default-features --features mysql
+          cargo check -p demarcate-sqlx --no-default-features --features sqlite
+          cargo check -p demarcate-diesel-async --no-default-features --features postgres
+          cargo check -p demarcate-diesel-async --no-default-features --features mysql
+          cargo check -p demarcate-sea-orm
+          cargo check -p demarcate-tokio-postgres
+          cargo check -p demarcate
+          cargo check -p demarcate --features sqlx-postgres
+          cargo check -p demarcate --features sqlx-sqlite
+          cargo check -p demarcate --features tokio-postgres
+          cargo check -p demarcate --features diesel-async-postgres
+          cargo check -p demarcate --features sqlx-mysql
+          cargo check -p demarcate --features sea-orm
+          cargo check -p demarcate --features diesel-async-mysql
       - name: lint and test the axum-orders example
         run: |
           cargo clippy --manifest-path examples/axum-orders/Cargo.toml --all-targets -- -D warnings
@@ -70,8 +113,34 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: demarcate
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -ptest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: test
+          MARIADB_DATABASE: demarcate
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       DEMARCATE_TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres
+      DEMARCATE_TEST_MYSQL_URL: mysql://root:test@localhost:3306/demarcate
+      DEMARCATE_TEST_MARIADB_URL: mysql://root:test@localhost:3307/demarcate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master

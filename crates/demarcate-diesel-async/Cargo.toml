@@ -1,0 +1,23 @@
+[package]
+name = "demarcate-diesel-async"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "diesel-async transaction manager for demarcate, on a deadpool pool, for PostgreSQL and MySQL"
+keywords = ["transaction", "database", "spring", "async", "diesel"]
+categories = ["database", "asynchronous"]
+
+[features]
+default = ["postgres"]
+postgres = ["diesel-async/postgres"]
+mysql = ["diesel-async/mysql"]
+
+[dependencies]
+demarcate-connection = { path = "../demarcate-connection", version = "0.1.0" }
+demarcate-core = { path = "../demarcate-core", version = "0.1.0", default-features = false }
+deadpool = { version = "0.13.0", default-features = false, features = ["managed"] }
+diesel = { version = "2.4.0", default-features = false }
+diesel-async = { version = "0.10.0", default-features = false, features = ["deadpool"] }

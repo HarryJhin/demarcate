@@ -57,8 +57,8 @@ transaction. `audit` runs in its own transaction and commits even when
 
 ## Status
 
-Version 0.1 is the first release. The API can change before 1.0. Only
-PostgreSQL through sqlx is implemented.
+Version 0.1 is the first release. The API can change before 1.0. There
+are drivers for sqlx, SeaORM, tokio-postgres and diesel-async.
 
 ## Setup
 
@@ -70,19 +70,6 @@ repository:
 demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.1.0", features = ["sqlx-postgres"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 ```
-
-## Compatibility
-
-| | Supported | Checked by the CI |
-|:--|:--|:--|
-| Rust | 1.94 and later; sqlx 0.9 requires 1.94 | 1.94 and the current stable release |
-| sqlx | 0.9.1 and later 0.9 releases | 0.9.1, and weekly the newest release |
-| tokio | 1.38 and later | 1.38, and weekly the newest release |
-| PostgreSQL | not limited | 18 |
-
-One CI job builds and tests with the lowest version of every direct
-dependency that `Cargo.toml` allows. A weekly job does the same with the
-newest versions.
 
 Register a transaction manager once at startup:
 
@@ -104,6 +91,29 @@ and a declaration on a method overrides it, as with a class-level
 `@Transactional`. A method that does not return such a `Result` is a
 compile error, so no method is left out without a word. Methods that are
 not transactional go in a separate `impl` block without the attribute.
+
+## Compatibility
+
+| | Supported | Checked by the CI |
+|:--|:--|:--|
+| Rust | 1.94 and later; sqlx 0.9 requires 1.94 | 1.94 and the current stable release |
+| sqlx | 0.9.1 and later 0.9 releases | 0.9.1, and weekly the newest release |
+| SeaORM | 2.0.4 and later 2 releases | 2.0.4, and weekly the newest release |
+| tokio-postgres, deadpool-postgres | 0.7.13 and later 0.7 releases; 0.14.1 and later 0.14 releases | those versions, and weekly the newest releases |
+| diesel-async, diesel | 0.10 releases; 2.4 and later 2 releases | 0.10.0 and 2.4.0, and weekly the newest releases |
+| tokio | 1.38 and later | 1.38, and weekly the newest release |
+| PostgreSQL | not limited | 18 |
+| MySQL | not limited | 8.4 |
+| MariaDB | not limited | 11 |
+| SQLite | the version that sqlx bundles | that version |
+
+One CI job builds and tests with the lowest version of every direct
+dependency that `Cargo.toml` allows. A weekly job does the same with the
+newest versions.
+
+The same conformance tests run on every database. Where a database behaves
+differently, the tests assert that behaviour, and the section "Drivers"
+lists it. Every driver runs these tests on each of its databases.
 
 ## Examples
 
@@ -205,6 +215,81 @@ savepoints.
   of a Tokio worker thread in a debug build.
 - JTA, XML configuration and the reactive variant are not ported.
 
+## Drivers
+
+Enable one feature for each connection library and database. Every driver
+module has a transaction-aware pool and a `manager` function, and passes
+the same conformance tests.
+
+| Feature | Module | Library | Databases | Data access |
+|:--|:--|:--|:--|:--|
+| `sqlx-postgres` | `demarcate::postgres` | sqlx | PostgreSQL | `sqlx::query(..).execute(&pool)` |
+| `sqlx-mysql` | `demarcate::mysql` | sqlx | MySQL, MariaDB | `sqlx::query(..).execute(&pool)` |
+| `sqlx-sqlite` | `demarcate::sqlite` | sqlx | SQLite | `sqlx::query(..).execute(&pool)` |
+| `sea-orm` | `demarcate::sea_orm` | SeaORM | PostgreSQL, MySQL, MariaDB, SQLite | `Entity::find().all(&database)` |
+| `tokio-postgres` | `demarcate::tokio_postgres` | tokio-postgres on deadpool-postgres | PostgreSQL | `pool.client().await?.query(..)` |
+| `diesel-async-postgres` | `demarcate::diesel_async::postgres` | diesel-async on deadpool | PostgreSQL | `query.load(&mut *pool.connection().await?)` |
+| `diesel-async-mysql` | `demarcate::diesel_async::mysql` | diesel-async on deadpool | MySQL, MariaDB | `query.load(&mut *pool.connection().await?)` |
+
+The sqlx and SeaORM drivers take the pool itself as the executor. The
+tokio-postgres and diesel-async drivers hand out the connection of the
+current transaction; drop it before the next request and before calling
+another transactional function.
+
+The SeaORM driver implements `ConnectionTrait`, which entity operations
+and statements use. It does not implement `StreamTrait` and
+`TransactionTrait`, so `stream` and SeaORM's own `transaction` are not
+available on it.
+
+A call can be cancelled at any point, also while its transaction begins or
+a statement runs. No driver then returns a connection with an open
+transaction or a changed setting to the pool. The tokio-postgres,
+diesel-async and sqlx MySQL drivers close such a connection. The SeaORM
+driver needs a Tokio runtime for this on MySQL and MariaDB.
+
+### Databases
+
+| | PostgreSQL | MySQL, MariaDB | SQLite |
+|:--|:--|:--|:--|
+| `read_only` | the server rejects a write | the server rejects a write | not enforced |
+| `isolation` | all four levels | all four levels | `Default` and `Serializable`; another level is an error |
+| `timeout` | checked before each query, and the server cancels a running statement | checked before each query | checked before each query |
+| A statement fails and the function returns `Ok` | the commit returns `UnexpectedRollback` | the other statements commit, unless the error ended the transaction (see below) | the other statements commit |
+| `RequiresNew` that writes after its caller wrote | commits on its own | commits on its own | fails with `database is locked` |
+| Schema statements (`CREATE TABLE`) | are part of the transaction | commit the transaction on the server; later statements run in autocommit mode and a rollback undoes nothing | are part of the transaction |
+
+MySQL and MariaDB roll the whole transaction back when a statement fails
+with a deadlock (SQLSTATE `40001`). MariaDB does the same with error 1020
+"Record has changed since last read", which `innodb_snapshot_isolation`
+raises. The connection then runs in autocommit mode. The sqlx and SeaORM
+drivers see these errors on statements that run through the pool: every
+further query of the transaction returns an error and does not run, and
+the transaction cannot commit. They do not see an error on a connection
+taken with `TransactionalPool::acquire`. The diesel-async driver does not
+see the errors of statements at all. In those cases the statements after
+the error run outside the transaction; return the error from the
+transactional function.
+
+The tokio-postgres and diesel-async drivers do not see a failed statement
+on PostgreSQL either. Their commit asks the server whether the transaction
+is usable, which costs one round trip.
+
+On every database, do not end the transaction in SQL inside a
+transactional function: `COMMIT`, `ROLLBACK`, and on SQLite a statement
+with `OR ROLLBACK`.
+
+SQLite allows one writer at a time. Use the WAL journal mode, so that
+readers and the writer do not block each other.
+
+### Another library
+
+`demarcate-connection` holds the transaction logic that is the same for
+every connection library. A driver implements its `ConnectionBackend`
+trait: how to obtain a connection, begin, commit, roll back and run a
+savepoint statement. A resource that
+is not a database connection implements `TransactionDriver` from
+`demarcate-core`.
+
 ## Checks that move to run time
 
 Passing a transaction handle lets the compiler check that a function
@@ -226,21 +311,27 @@ loud:
 |:--|:--|
 | `demarcate` | entry crate, re-exports the others |
 | `demarcate-core` | definition, status, synchronization, transaction manager core, template; no async runtime required |
+| `demarcate-connection` | the transaction driver for connection libraries: connection holder, savepoints, the `ConnectionBackend` trait |
 | `demarcate-interceptor` | transaction attribute, rollback rules, invocation flow, registry |
 | `demarcate-macros` | `#[transactional]` |
-| `demarcate-sqlx` | sqlx driver for PostgreSQL, `TransactionalPool` |
-
-A driver for another database library implements `TransactionDriver`
-from `demarcate-core`.
+| `demarcate-sqlx` | sqlx drivers for PostgreSQL, MySQL, MariaDB and SQLite, `TransactionalPool` |
+| `demarcate-sea-orm` | SeaORM driver, `TransactionalDatabase` |
+| `demarcate-tokio-postgres` | tokio-postgres driver on deadpool-postgres |
+| `demarcate-diesel-async` | diesel-async drivers on deadpool for PostgreSQL, MySQL and MariaDB |
 
 ## Tests
 
 ```sh
 cargo test
-DEMARCATE_TEST_DATABASE_URL=postgres://... cargo test -- --include-ignored
+DEMARCATE_TEST_DATABASE_URL=postgres://... \
+DEMARCATE_TEST_MYSQL_URL=mysql://... \
+DEMARCATE_TEST_MARIADB_URL=mysql://... \
+  cargo test -- --include-ignored
 ```
 
-The second command runs the PostgreSQL tests.
+The first command runs the tests that need no server, the SQLite tests
+included. The second command also runs the PostgreSQL, MySQL and MariaDB
+tests.
 
 ## License
 

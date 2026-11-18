@@ -2,10 +2,14 @@
 resolver = "3"
 members = [
     "crates/demarcate",
+    "crates/demarcate-connection",
     "crates/demarcate-core",
+    "crates/demarcate-diesel-async",
     "crates/demarcate-interceptor",
     "crates/demarcate-macros",
+    "crates/demarcate-sea-orm",
     "crates/demarcate-sqlx",
+    "crates/demarcate-tokio-postgres",
 ]
 
 [workspace.package]

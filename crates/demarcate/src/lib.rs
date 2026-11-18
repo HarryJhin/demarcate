@@ -63,10 +63,14 @@
 //! - [`TransactionTemplate`] to set a transaction boundary in code.
 //! - [`on_transaction`] and [`TransactionSynchronization`] to run code at a phase of the
 //!   transaction.
-//! - [`TransactionDriver`] to support another database library.
+//! - [`connection::ConnectionBackend`] to support another connection library, and
+//!   [`TransactionDriver`] for a resource that is not a database connection.
 
 #![warn(missing_docs)]
 
+/// The transaction driver for libraries that run a transaction on one database connection.
+/// Implement its `ConnectionBackend` to support another connection library.
+pub use demarcate_connection as connection;
 pub use demarcate_core::*;
 pub use demarcate_interceptor::{
     FunctionRollbackEvent, RollbackRule, TransactionAttribute, TransactionInfo, TransactionManagerRegistry,
@@ -77,6 +81,23 @@ pub use demarcate_interceptor::{
 pub use demarcate_interceptor::{TransactionalReturn, assert_transactional_return};
 pub use demarcate_macros::transactional;
 
+/// The diesel-async drivers and the transaction-aware pools, on deadpool, for PostgreSQL, MySQL
+/// and MariaDB.
+#[cfg(any(feature = "diesel-async-postgres", feature = "diesel-async-mysql"))]
+pub use demarcate_diesel_async as diesel_async;
+/// The SeaORM driver and the transaction-aware connection, for PostgreSQL, MySQL, MariaDB and
+/// SQLite.
+#[cfg(feature = "sea-orm")]
+pub use demarcate_sea_orm as sea_orm;
+/// The MySQL and MariaDB driver and the transaction-aware pool, through sqlx.
+#[cfg(feature = "sqlx-mysql")]
+pub use demarcate_sqlx::mysql;
 /// The PostgreSQL driver and the transaction-aware pool, through sqlx.
 #[cfg(feature = "sqlx-postgres")]
 pub use demarcate_sqlx::postgres;
+/// The SQLite driver and the transaction-aware pool, through sqlx.
+#[cfg(feature = "sqlx-sqlite")]
+pub use demarcate_sqlx::sqlite;
+/// The tokio-postgres driver and the transaction-aware pool, on deadpool-postgres.
+#[cfg(feature = "tokio-postgres")]
+pub use demarcate_tokio_postgres as tokio_postgres;
