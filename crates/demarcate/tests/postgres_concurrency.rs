@@ -31,6 +31,8 @@ impl From<sqlx::Error> for ServiceError {
     }
 }
 
+type Call<'a> = std::pin::Pin<Box<dyn Future<Output = Result<(), ServiceError>> + 'a>>;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Nested {
     Required,
@@ -260,13 +262,9 @@ impl Service {
     }
 
     #[transactional]
-    async fn outer_that_lets_a_call_escape<'a>(
-        &'a self,
-        escaped: &mut Option<std::pin::Pin<Box<dyn Future<Output = Result<(), ServiceError>> + 'a>>>,
-    ) -> Result<(), ServiceError> {
+    async fn outer_that_lets_a_call_escape<'a>(&'a self, escaped: &mut Option<Call<'a>>) -> Result<(), ServiceError> {
         self.insert("outer_before").await?;
-        let mut call: std::pin::Pin<Box<dyn Future<Output = Result<(), ServiceError>> + 'a>> =
-            Box::pin(self.slow_then_insert("escaped"));
+        let mut call: Call<'a> = Box::pin(self.slow_then_insert("escaped"));
         tokio::select! {
             biased;
             _ = &mut call => panic!("the call must still be running"),
