@@ -95,7 +95,7 @@ impl<B: ConnectionBackend> ConnectionDriver<B> {
         match self.source.backend().execute(connection, &statement).await {
             Ok(()) => Ok(()),
             Err(error) => {
-                if B::ends_transaction(&error) {
+                if self.source.backend().ends_transaction(&error) {
                     holder.mark_ended();
                 } else {
                     holder.mark_aborted();
@@ -146,7 +146,7 @@ impl<B: ConnectionBackend> TransactionDriver for ConnectionDriver<B> {
                 source: Some(error.into()),
             }
         })?;
-        let holder = Arc::new(ConnectionHolder::new(started));
+        let holder = Arc::new(ConnectionHolder::new(self.source.shared_backend(), started));
         holder.set_synchronized_with_transaction(true);
         holder.set_transaction_active(true);
         if let Some(timeout) = definition.timeout.or(settings.default_timeout) {
@@ -316,7 +316,7 @@ impl<B: ConnectionBackend> TransactionDriver for ConnectionDriver<B> {
         holder.savepoint_gone(name);
         match released {
             Ok(()) => Ok(()),
-            Err(SavepointError::Backend(error)) if B::release_failure_is_ignorable(&error) => Ok(()),
+            Err(SavepointError::Backend(error)) if self.source.backend().release_failure_is_ignorable(&error) => Ok(()),
             Err(error) => Err(error.into_system("Could not release the savepoint")),
         }
     }

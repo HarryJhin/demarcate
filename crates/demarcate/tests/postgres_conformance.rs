@@ -7,7 +7,11 @@ mod db {
         sql.to_owned()
     }
 
-    pub async fn connect(connections: u32) -> sqlx::PgPool {
+    pub type Raw = sqlx::PgPool;
+
+    include!("shared/sqlx_db.rs");
+
+    pub async fn connect(connections: u32) -> Raw {
         let url = std::env::var("DEMARCATE_TEST_DATABASE_URL").expect("DEMARCATE_TEST_DATABASE_URL must be set");
         sqlx::postgres::PgPoolOptions::new().max_connections(connections).connect(&url).await.expect("connect")
     }

@@ -7,7 +7,11 @@ mod db {
         (1..=9).fold(sql.to_owned(), |sql, index| sql.replace(&format!("${index}"), "?"))
     }
 
-    pub async fn connect(connections: u32) -> sqlx::MySqlPool {
+    pub type Raw = sqlx::MySqlPool;
+
+    include!("shared/sqlx_db.rs");
+
+    pub async fn connect(connections: u32) -> Raw {
         let url = std::env::var("DEMARCATE_TEST_MARIADB_URL").expect("DEMARCATE_TEST_MARIADB_URL must be set");
         sqlx::mysql::MySqlPoolOptions::new().max_connections(connections).connect(&url).await.expect("connect")
     }

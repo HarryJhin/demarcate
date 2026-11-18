@@ -11,8 +11,6 @@ use demarcate::{
     Isolation, Propagation, TransactionDefinition, TransactionError, TransactionPhase, TransactionTemplate,
     current_transaction_status, on_transaction, registry, transactional,
 };
-use futures_util::TryStreamExt;
-use sqlx::{AssertSqlSafe, Row};
 use tokio::runtime::Runtime;
 use tokio::sync::{Mutex, Notify, OnceCell};
 
@@ -29,7 +27,7 @@ const TABLE: &str = "demarcate_conformance";
 #[derive(Debug)]
 enum ServiceError {
     Transaction(TransactionError),
-    Sql(sqlx::Error),
+    Sql(db::Error),
     Rejected,
 }
 
@@ -39,8 +37,8 @@ impl From<TransactionError> for ServiceError {
     }
 }
 
-impl From<sqlx::Error> for ServiceError {
-    fn from(error: sqlx::Error) -> Self {
+impl From<db::Error> for ServiceError {
+    fn from(error: db::Error) -> Self {
         Self::Sql(error)
     }
 }
@@ -49,39 +47,29 @@ impl ServiceError {
     fn infrastructure(&self) -> Option<&TransactionError> {
         match self {
             Self::Transaction(error) => Some(error),
-            Self::Sql(sqlx::Error::Configuration(error)) => error.downcast_ref::<TransactionError>(),
+            Self::Sql(error) => db::transaction_error(error),
             _ => None,
         }
     }
 }
 
 struct Service {
+    raw: db::Raw,
     pool: db::TransactionalPool,
     manager: Arc<dyn demarcate::PlatformTransactionManager>,
 }
 
 impl Service {
     async fn insert(&self, value: &str) -> Result<(), ServiceError> {
-        sqlx::query(AssertSqlSafe(db::placeholders(&format!("insert into {TABLE} values($1)"))))
-            .bind(value.to_owned())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        Ok(db::insert(&self.pool, TABLE, value).await?)
     }
 
     async fn visible(&self) -> Result<Vec<String>, ServiceError> {
-        let rows = sqlx::query(AssertSqlSafe(format!("select v from {TABLE} order by v"))).fetch_all(&self.pool).await?;
-        Ok(rows.iter().map(|row| row.get::<String, _>(0)).collect())
+        Ok(db::values(&self.pool, TABLE).await?)
     }
 
     async fn committed(&self) -> Vec<String> {
-        sqlx::query(AssertSqlSafe(format!("select v from {TABLE} order by v")))
-            .fetch_all(self.pool.inner())
-            .await
-            .unwrap()
-            .iter()
-            .map(|row| row.get::<String, _>(0))
-            .collect()
+        db::raw_values(&self.raw, &format!("select v from {TABLE} order by v")).await
     }
 
     #[transactional]
@@ -209,11 +197,7 @@ impl Service {
         }
         let own = self.visible().await?;
         let committed = self.committed().await;
-        let mut streamed = Vec::new();
-        let mut rows = sqlx::query(AssertSqlSafe(format!("select v from {TABLE} order by v"))).fetch(&self.pool);
-        while let Some(row) = rows.try_next().await? {
-            streamed.push(row.get::<String, _>(0));
-        }
+        let streamed = db::stream_values(&self.pool, TABLE).await?;
         Ok((own, committed, streamed))
     }
 
@@ -265,15 +249,12 @@ static ENV: OnceCell<Env> = OnceCell::const_new();
 async fn env() -> &'static Env {
     ENV.get_or_init(|| async {
         let raw = db::connect(4).await;
-        sqlx::query(AssertSqlSafe(format!("drop table if exists {TABLE}"))).execute(&raw).await.unwrap();
-        sqlx::query(AssertSqlSafe(format!("create table {TABLE} (v varchar(100) primary key)")))
-            .execute(&raw)
-            .await
-            .unwrap();
-        let pool = db::TransactionalPool::new(raw);
+        db::raw_execute(&raw, &format!("drop table if exists {TABLE}")).await;
+        db::raw_execute(&raw, &format!("create table {TABLE} (v varchar(100) primary key)")).await;
+        let pool = db::transactional(&raw);
         let manager: Arc<dyn demarcate::PlatformTransactionManager> = Arc::new(db::manager(pool.clone()));
         registry().set_default(manager.clone());
-        Env { service: Arc::new(Service { pool, manager }), serial: Mutex::new(()) }
+        Env { service: Arc::new(Service { raw, pool, manager }), serial: Mutex::new(()) }
     })
     .await
 }
@@ -282,7 +263,7 @@ fn run_test(body: impl FnOnce(&'static Service) -> Pin<Box<dyn Future<Output = (
     RUNTIME.block_on(async {
         let env = env().await;
         let _serial = env.serial.lock().await;
-        sqlx::query(AssertSqlSafe(format!("delete from {TABLE}"))).execute(env.service.pool.inner()).await.unwrap();
+        db::raw_execute(&env.service.raw, &format!("delete from {TABLE}")).await;
         body(&env.service).await;
     });
 }
@@ -380,7 +361,7 @@ db_test!(a_write_in_a_read_only_transaction, |service| {
             assert_eq!(service.committed().await, ["a"], "SQLite does not enforce the read-only flag");
         }
         Kind::Postgres | Kind::MySql => {
-            assert!(matches!(result, Err(ServiceError::Sql(sqlx::Error::Database(_)))), "{result:?}");
+            assert!(matches!(&result, Err(ServiceError::Sql(error)) if db::is_database_error(error)), "{result:?}");
             assert!(service.committed().await.is_empty());
         }
     }
@@ -415,16 +396,8 @@ db_test!(a_query_after_the_deadline_fails_and_the_transaction_rolls_back, |servi
 
 db_test!(a_pool_that_requires_a_transaction_refuses_to_run_without_one, |service| {
     let strict = service.pool.transaction_required();
-    let result = sqlx::query(AssertSqlSafe(db::placeholders(&format!("insert into {TABLE} values($1)"))))
-        .bind("a".to_owned())
-        .execute(&strict)
-        .await;
-    match result {
-        Err(sqlx::Error::Configuration(error)) => {
-            assert!(matches!(error.downcast_ref::<TransactionError>(), Some(TransactionError::NoTransaction(_))));
-        }
-        other => panic!("unexpected result: {other:?}"),
-    }
+    let error = db::insert(&strict, TABLE, "a").await.expect_err("the pool must refuse to run");
+    assert!(matches!(db::transaction_error(&error), Some(TransactionError::NoTransaction(_))), "{error:?}");
     assert!(service.committed().await.is_empty());
 });
 
@@ -505,23 +478,13 @@ db_test!(a_template_runs_the_same_transactions_in_code, |service| {
 
 db_test!(the_settings_of_a_transaction_do_not_stay_on_its_connection, |service| {
     let raw = db::connect(1).await;
-    sqlx::query(AssertSqlSafe(format!("create table if not exists {TABLE}_single (v varchar(100) primary key)")))
-        .execute(&raw)
-        .await
-        .unwrap();
-    sqlx::query(AssertSqlSafe(format!("delete from {TABLE}_single"))).execute(&raw).await.unwrap();
-    let pool = db::TransactionalPool::new(raw);
+    db::raw_execute(&raw, &format!("create table if not exists {TABLE}_single (v varchar(100) primary key)")).await;
+    db::raw_execute(&raw, &format!("delete from {TABLE}_single")).await;
+    let pool = db::transactional(&raw);
     let manager: Arc<dyn demarcate::PlatformTransactionManager> = Arc::new(db::manager(pool.clone()));
     let insert = |value: &'static str| {
         let pool = pool.clone();
-        async move {
-            sqlx::query(AssertSqlSafe(db::placeholders(&format!("insert into {TABLE}_single values($1)"))))
-                .bind(value.to_owned())
-                .execute(&pool)
-                .await
-                .map(|_| ())
-                .map_err(ServiceError::Sql)
-        }
+        async move { db::insert(&pool, &format!("{TABLE}_single"), value).await.map_err(ServiceError::Sql) }
     };
 
     let restricted = TransactionTemplate::with_definition(

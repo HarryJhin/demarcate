@@ -49,6 +49,7 @@ impl<C> Drop for Lease<C> {
 /// It keeps the connection, the rollback-only mark, the deadline and the open savepoints.
 /// Application code does not use it; it is public for code that inspects the context.
 pub struct ConnectionHolder<B: ConnectionBackend> {
+    backend: Arc<B>,
     slot: Arc<Slot<B::Connection>>,
     synchronized_with_transaction: AtomicBool,
     rollback_only_depth: Mutex<Option<usize>>,
@@ -62,8 +63,9 @@ pub struct ConnectionHolder<B: ConnectionBackend> {
 }
 
 impl<B: ConnectionBackend> ConnectionHolder<B> {
-    pub(crate) fn new(connection: B::Connection) -> Self {
+    pub(crate) fn new(backend: Arc<B>, connection: B::Connection) -> Self {
         Self {
+            backend,
             slot: Arc::new(Slot { leased: AtomicBool::new(false), connection: Mutex::new(Some(connection)) }),
             synchronized_with_transaction: AtomicBool::new(false),
             rollback_only_depth: Mutex::new(None),
@@ -130,9 +132,9 @@ impl<B: ConnectionBackend> ConnectionHolder<B> {
     /// Records the failure of a statement that ran on the connection of this transaction, as the
     /// backend classifies the error.
     pub fn statement_failed(&self, error: &B::Error) {
-        if B::ends_transaction(error) {
+        if self.backend.ends_transaction(error) {
             self.mark_ended();
-        } else if B::taints_transaction(error) {
+        } else if self.backend.taints_transaction(error) {
             self.mark_aborted();
         }
     }

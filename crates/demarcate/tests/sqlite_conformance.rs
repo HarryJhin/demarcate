@@ -11,7 +11,11 @@ mod db {
         sql.to_owned()
     }
 
-    pub async fn connect(connections: u32) -> sqlx::SqlitePool {
+    pub type Raw = sqlx::SqlitePool;
+
+    include!("shared/sqlx_db.rs");
+
+    pub async fn connect(connections: u32) -> Raw {
         let path = std::env::temp_dir().join(format!("demarcate-conformance-{}-{connections}.db", std::process::id()));
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

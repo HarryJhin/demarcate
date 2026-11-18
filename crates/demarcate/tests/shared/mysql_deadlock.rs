@@ -1,10 +1,6 @@
 impl Service {
-    async fn set_marker(&self, value: &str) -> Result<(), sqlx::Error> {
-        sqlx::query(AssertSqlSafe(format!("update {TABLE}_lock set marker = marker + 1 where v = ?")))
-            .bind(value.to_owned())
-            .execute(&self.pool)
-            .await
-            .map(|_| ())
+    async fn set_marker(&self, value: &str) -> Result<(), db::Error> {
+        db::increment_marker(&self.pool, &format!("{TABLE}_lock"), value).await
     }
 
     // Locks one row, waits until the other call has locked the other row, then asks for that row.
@@ -17,7 +13,7 @@ impl Service {
         let Err(error) = self.set_marker(second).await else {
             return Ok(false);
         };
-        assert_eq!(error.as_database_error().and_then(|database| database.code()).as_deref(), Some("40001"), "{error}");
+        assert_eq!(db::sqlstate(&error).as_deref(), Some("40001"), "{error}");
         let after = self.insert("after-deadlock").await;
         let refused = after.as_ref().err().and_then(ServiceError::infrastructure);
         assert!(matches!(refused, Some(TransactionError::InvalidState(_))), "{after:?}");
@@ -26,13 +22,10 @@ impl Service {
 }
 
 db_test!(after_a_deadlock_the_connection_refuses_statements_and_the_transaction_cannot_commit, |service| {
-    let raw = service.pool.inner();
-    sqlx::query(AssertSqlSafe(format!("drop table if exists {TABLE}_lock"))).execute(raw).await.unwrap();
-    sqlx::query(AssertSqlSafe(format!("create table {TABLE}_lock (v varchar(100) primary key, marker int not null)")))
-        .execute(raw)
-        .await
-        .unwrap();
-    sqlx::query(AssertSqlSafe(format!("insert into {TABLE}_lock values ('a', 0), ('b', 0)"))).execute(raw).await.unwrap();
+    let raw = &service.raw;
+    db::raw_execute(raw, &format!("drop table if exists {TABLE}_lock")).await;
+    db::raw_execute(raw, &format!("create table {TABLE}_lock (v varchar(100) primary key, marker int not null)")).await;
+    db::raw_execute(raw, &format!("insert into {TABLE}_lock values ('a', 0), ('b', 0)")).await;
 
     let both_locked = Arc::new(tokio::sync::Barrier::new(2));
     let (forward, backward) =
@@ -49,9 +42,6 @@ db_test!(after_a_deadlock_the_connection_refuses_statements_and_the_transaction_
     );
     assert!(matches!(survivor, Ok(false)), "{survivor:?}");
     assert!(service.committed().await.is_empty(), "nothing ran outside the transaction after the deadlock");
-    let markers: Vec<i32> = sqlx::query_scalar(AssertSqlSafe(format!("select marker from {TABLE}_lock order by v")))
-        .fetch_all(raw)
-        .await
-        .unwrap();
-    assert_eq!(markers, [1, 1], "only the surviving transaction changed the rows");
+    let markers = db::raw_values(raw, &format!("select cast(marker as char) from {TABLE}_lock order by v")).await;
+    assert_eq!(markers, ["1", "1"], "only the surviving transaction changed the rows");
 });

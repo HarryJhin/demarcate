@@ -77,6 +77,10 @@ impl<B: ConnectionBackend> ConnectionSource<B> {
         &self.backend
     }
 
+    pub(crate) fn shared_backend(&self) -> Arc<B> {
+        self.backend.clone()
+    }
+
     /// Returns the key under which the connection of a transaction is bound to the context.
     pub fn resource_key(&self) -> &ResourceKey {
         &self.key
@@ -174,7 +178,7 @@ impl<B: ConnectionBackend> ConnectionSource<B> {
             return Ok(ConnectionHandle(Handle::Standalone(connection)));
         }
 
-        let holder = Arc::new(ConnectionHolder::new(connection));
+        let holder = Arc::new(ConnectionHolder::new(self.backend.clone(), connection));
         synchronization::register_synchronization(Arc::new(ConnectionSynchronization {
             holder: holder.clone(),
             key: self.key.clone(),

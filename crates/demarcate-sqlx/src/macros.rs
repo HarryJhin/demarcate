@@ -96,11 +96,11 @@ macro_rules! sqlx_driver {
                 apply_timeout(connection.connection(), remaining).await
             }
 
-            fn taints_transaction(error: &sqlx::Error) -> bool {
+            fn taints_transaction(&self, error: &sqlx::Error) -> bool {
                 taints_transaction(error)
             }
 
-            fn ends_transaction(error: &sqlx::Error) -> bool {
+            fn ends_transaction(&self, error: &sqlx::Error) -> bool {
                 ends_transaction(error)
             }
 
@@ -108,7 +108,7 @@ macro_rules! sqlx_driver {
                 is_usable(connection.connection()).await
             }
 
-            fn release_failure_is_ignorable(error: &sqlx::Error) -> bool {
+            fn release_failure_is_ignorable(&self, error: &sqlx::Error) -> bool {
                 release_failure_is_ignorable(error)
             }
         }

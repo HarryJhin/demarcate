@@ -80,7 +80,7 @@ pub trait ConnectionBackend: Send + Sync + 'static {
     /// Returns whether a statement that failed with this error can have left the transaction in
     /// a state in which it cannot commit. The driver then calls
     /// [`is_usable`](ConnectionBackend::is_usable) before the commit.
-    fn taints_transaction(_error: &Self::Error) -> bool {
+    fn taints_transaction(&self, _error: &Self::Error) -> bool {
         false
     }
 
@@ -90,7 +90,7 @@ pub trait ConnectionBackend: Send + Sync + 'static {
     ///
     /// The driver then refuses every further use of the connection in this transaction, because
     /// a statement would run and commit on its own, and the transaction cannot commit.
-    fn ends_transaction(_error: &Self::Error) -> bool {
+    fn ends_transaction(&self, _error: &Self::Error) -> bool {
         false
     }
 
@@ -104,7 +104,7 @@ pub trait ConnectionBackend: Send + Sync + 'static {
 
     /// Returns whether a failure to release a savepoint can be ignored, for example because the
     /// savepoint no longer exists. The default is `false`.
-    fn release_failure_is_ignorable(_error: &Self::Error) -> bool {
+    fn release_failure_is_ignorable(&self, _error: &Self::Error) -> bool {
         false
     }
 }
