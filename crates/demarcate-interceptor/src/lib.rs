@@ -21,4 +21,4 @@ pub use aspect::{
 #[doc(hidden)]
 pub use aspect::{TransactionalReturn, assert_transactional_return};
 pub use attribute::{RollbackRule, TransactionAttribute, error_chain_contains};
-pub use registry::{MethodRollbackEvent, TransactionManagerRegistry, registry};
+pub use registry::{FunctionRollbackEvent, TransactionManagerRegistry, registry};

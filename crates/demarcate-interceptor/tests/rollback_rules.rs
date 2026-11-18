@@ -76,7 +76,7 @@ fn constructor_preconditions() {
 
 #[test]
 fn type_rule_pattern_is_the_type_name() {
-    assert!(RollbackRule::rollback_for::<AppError>().exception_pattern().ends_with("AppError"));
+    assert!(RollbackRule::rollback_for::<AppError>().error_pattern().ends_with("AppError"));
 }
 
 #[test]

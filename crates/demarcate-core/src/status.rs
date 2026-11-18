@@ -314,7 +314,7 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
             } else if self.rollback_only_when_abandoned
                 && let Err(error) = self.driver.set_rollback_only_on_abandon(transaction)
             {
-                tracing::debug!(%error, "Could not mark the abandoned participating transaction as rollback-only");
+                tracing::debug!(%error, "Could not mark the transaction that the abandoned call joined as rollback-only");
             }
         }
         let suspended = self.take_suspended_resources();

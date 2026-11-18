@@ -56,13 +56,13 @@ async fn enclosing_transaction_with_nested_transaction_on_advised_inside() {
         invoke_with_manager(inner_manager, inner, "test::get_spouse", async {
             let info = current_transaction_info().unwrap();
             assert_eq!(info.attribute.definition.propagation, Propagation::RequiresNew);
-            assert_eq!(info.joinpoint_identification, "test::get_spouse");
+            assert_eq!(info.function, "test::get_spouse");
             Ok::<_, AppError>(())
         })
         .await?;
         let info = current_transaction_info().unwrap();
         assert_eq!(info.attribute.definition.propagation, Propagation::Required);
-        assert_eq!(info.joinpoint_identification, "test::exceptional");
+        assert_eq!(info.function, "test::exceptional");
         Ok::<_, AppError>(())
     })
     .await
@@ -181,7 +181,7 @@ async fn panic_publishes_method_rollback_event() {
     let seen: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::default();
     let sink = seen.clone();
     demarcate_interceptor::registry().add_rollback_listener(move |event| {
-        if event.method == "test::panic_event" {
+        if event.function == "test::panic_event" {
             sink.lock().unwrap().push(event.failure);
         }
     });
@@ -246,8 +246,8 @@ async fn rollback_publishes_method_rollback_event() {
     let seen: Arc<std::sync::Mutex<Vec<(String, &'static str)>>> = Arc::default();
     let sink = seen.clone();
     demarcate_interceptor::registry().add_rollback_listener(move |event| {
-        if event.method == "test::publishes_rollback" {
-            sink.lock().unwrap().push((event.method.clone(), event.failure));
+        if event.function == "test::publishes_rollback" {
+            sink.lock().unwrap().push((event.function.clone(), event.failure));
         }
     });
     let tm = CallCountingTransactionManager::new();

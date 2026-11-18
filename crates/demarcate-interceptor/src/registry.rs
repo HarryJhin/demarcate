@@ -17,16 +17,16 @@ struct Managers {
 /// Register a listener with
 /// [`TransactionManagerRegistry::add_rollback_listener`]. The event is published before the
 /// rollback happens.
-pub struct MethodRollbackEvent {
+pub struct FunctionRollbackEvent {
     /// The path of the function, or its descriptor when one is set.
-    pub method: String,
+    pub function: String,
     /// The type name of the error, or `"panic"`.
     pub failure: &'static str,
     /// The status of the transaction that is about to roll back.
     pub transaction: Arc<dyn TransactionStatus>,
 }
 
-type RollbackListener = Arc<dyn Fn(&MethodRollbackEvent) + Send + Sync>;
+type RollbackListener = Arc<dyn Fn(&FunctionRollbackEvent) + Send + Sync>;
 
 /// The transaction managers that `#[transactional]` functions use.
 ///
@@ -55,12 +55,12 @@ impl TransactionManagerRegistry {
         self.managers.write().expect("registry lock").named.insert(qualifier.into(), manager);
     }
 
-    /// Registers a listener for [`MethodRollbackEvent`].
-    pub fn add_rollback_listener(&self, listener: impl Fn(&MethodRollbackEvent) + Send + Sync + 'static) {
+    /// Registers a listener for [`FunctionRollbackEvent`].
+    pub fn add_rollback_listener(&self, listener: impl Fn(&FunctionRollbackEvent) + Send + Sync + 'static) {
         self.rollback_listeners.write().expect("registry lock").push(Arc::new(listener));
     }
 
-    pub(crate) fn publish_rollback(&self, event: &MethodRollbackEvent) {
+    pub(crate) fn publish_rollback(&self, event: &FunctionRollbackEvent) {
         let listeners = self.rollback_listeners.read().expect("registry lock").clone();
         for listener in listeners {
             listener(event);

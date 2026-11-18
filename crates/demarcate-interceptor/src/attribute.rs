@@ -35,7 +35,7 @@ pub struct RollbackRule {
 impl fmt::Debug for RollbackRule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RollbackRule")
-            .field("exception_pattern", &self.exception_pattern())
+            .field("error_pattern", &self.error_pattern())
             .field("rollback", &self.rollback)
             .finish()
     }
@@ -108,8 +108,12 @@ impl RollbackRule {
         self.rollback
     }
 
-    /// Returns the type name or the pattern that this rule matches.
-    pub fn exception_pattern(&self) -> &str {
+    /// Returns the text that names the errors this rule matches.
+    ///
+    /// For a rule made with [`rollback_for_name`](RollbackRule::rollback_for_name) or
+    /// [`no_rollback_for_name`](RollbackRule::no_rollback_for_name) this is the pattern. For every
+    /// other rule it is the full type name of the error, as [`std::any::type_name`] gives it.
+    pub fn error_pattern(&self) -> &str {
         match &self.matcher {
             Matcher::Type { name, .. } | Matcher::Predicate { name, .. } => name,
             Matcher::Pattern(pattern) => pattern,
@@ -158,7 +162,7 @@ pub struct TransactionAttribute {
     /// manager or listener can.
     pub labels: Vec<String>,
     /// A description of the function. When set, it replaces the path of the function as the name of
-    /// the transaction and in [`MethodRollbackEvent`](crate::MethodRollbackEvent).
+    /// the transaction and in [`FunctionRollbackEvent`](crate::FunctionRollbackEvent).
     pub descriptor: Option<String>,
 }
 

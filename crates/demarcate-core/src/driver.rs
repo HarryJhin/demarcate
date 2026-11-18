@@ -128,7 +128,7 @@ pub trait TransactionDriver: Send + Sync + 'static {
     /// return `true` must implement this. The default returns an error.
     fn set_rollback_only(&self, _transaction: &Self::Transaction) -> Result<(), TransactionError> {
         Err(TransactionError::InvalidTransactionState(
-            "Participating in existing transactions is not supported - a driver whose \
+            "Joining an existing transaction is not supported: a driver whose \
              is_existing_transaction returns true must implement set_rollback_only"
                 .into(),
         ))

@@ -347,15 +347,16 @@ impl<D: TransactionDriver> TransactionManager<D> {
                 let current = synchronization::current_transaction_isolation_level();
                 if current != Some(definition.isolation) {
                     return Err(TransactionError::InvalidTransactionState(format!(
-                        "Participating transaction with definition specifies isolation level which is \
-                         incompatible with existing transaction: {}",
-                        current.map_or_else(|| "(unknown)".to_owned(), |level| format!("{level:?}"))
+                        "A call that joins the existing transaction asked for isolation level {:?}, but the \
+                         transaction runs at {}",
+                        definition.isolation,
+                        current.map_or_else(|| "an unknown isolation level".to_owned(), |level| format!("{level:?}"))
                     )));
                 }
             }
             if !definition.read_only && synchronization::is_current_transaction_read_only() {
                 return Err(TransactionError::InvalidTransactionState(
-                    "Participating transaction with definition is not marked as read-only but existing transaction is"
+                    "A call that is not read-only cannot join the existing transaction, because the transaction is read-only"
                         .into(),
                 ));
             }

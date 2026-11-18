@@ -6,7 +6,7 @@ use std::sync::Arc;
 use demarcate_core::{CatchUnwind, PlatformTransactionManager, TransactionError, TransactionStatus, synchronization};
 
 use crate::attribute::TransactionAttribute;
-use crate::registry::{MethodRollbackEvent, registry};
+use crate::registry::{FunctionRollbackEvent, registry};
 
 /// The transaction of the `#[transactional]` function that is running: its settings, its name
 /// and its status.
@@ -14,7 +14,7 @@ pub struct TransactionInfo {
     /// The settings of the function.
     pub attribute: TransactionAttribute,
     /// The path of the function, or its descriptor when one is set.
-    pub joinpoint_identification: String,
+    pub function: String,
     /// The status of the transaction.
     pub status: Arc<dyn TransactionStatus>,
 }
@@ -54,7 +54,7 @@ pub fn current_transaction_status() -> Result<Arc<dyn TransactionStatus>, Transa
 /// Runs the future in a transaction as the attribute says, with the manager that the attribute
 /// names in the global [`registry`](crate::registry).
 ///
-/// This is what `#[transactional]` expands to. `method_identification` is the path of the
+/// This is what `#[transactional]` expands to. `function_path` is the path of the
 /// function. It becomes the name of the transaction, unless the attribute sets a descriptor or
 /// its definition sets a name.
 ///
@@ -73,7 +73,7 @@ pub fn current_transaction_status() -> Result<Arc<dyn TransactionStatus>, Transa
 /// A panic of the future rolls the transaction back and then continues to unwind.
 pub async fn invoke_within_transaction<T, E, Fut>(
     attribute: TransactionAttribute,
-    method_identification: &str,
+    function_path: &str,
     invocation: Fut,
 ) -> Result<T, E>
 where
@@ -81,7 +81,7 @@ where
     Fut: Future<Output = Result<T, E>>,
 {
     let manager = registry().determine_transaction_manager(&attribute)?;
-    invoke_with_manager(manager, attribute, method_identification, invocation).await
+    invoke_with_manager(manager, attribute, function_path, invocation).await
 }
 
 /// Runs the future in a transaction with the given manager.
@@ -90,7 +90,7 @@ where
 pub async fn invoke_with_manager<T, E, Fut>(
     manager: Arc<dyn PlatformTransactionManager>,
     attribute: TransactionAttribute,
-    method_identification: &str,
+    function_path: &str,
     invocation: Fut,
 ) -> Result<T, E>
 where
@@ -98,36 +98,36 @@ where
     Fut: Future<Output = Result<T, E>>,
 {
     let invocation = Box::pin(invocation);
-    let invoked = Box::pin(invoke(manager, attribute, method_identification, invocation));
+    let invoked = Box::pin(invoke(manager, attribute, function_path, invocation));
     Box::pin(synchronization::call_scope(invoked)).await
 }
 
 async fn invoke<T, E, Fut>(
     manager: Arc<dyn PlatformTransactionManager>,
     mut attribute: TransactionAttribute,
-    method_identification: &str,
+    function_path: &str,
     invocation: Pin<Box<Fut>>,
 ) -> Result<T, E>
 where
     E: From<TransactionError> + 'static,
     Fut: Future<Output = Result<T, E>>,
 {
-    let joinpoint_identification = attribute.descriptor.clone().unwrap_or_else(|| method_identification.to_owned());
+    let function = attribute.descriptor.clone().unwrap_or_else(|| function_path.to_owned());
     if attribute.definition.name.is_none() {
-        attribute.definition.name = Some(joinpoint_identification.clone());
+        attribute.definition.name = Some(function.clone());
     }
 
     let status = manager.transaction(Some(&attribute.definition)).await?;
     let _abandon = demarcate_core::AbandonOnDrop(status.clone());
-    let info = Arc::new(TransactionInfo { attribute, joinpoint_identification, status: status.clone() });
+    let info = Arc::new(TransactionInfo { attribute, function, status: status.clone() });
     let restore = synchronization::attach_to_call(info.clone());
 
     let outcome = CatchUnwind::new(invocation).await;
 
     match outcome {
         Err(panic) => {
-            registry().publish_rollback(&MethodRollbackEvent {
-                method: info.joinpoint_identification.clone(),
+            registry().publish_rollback(&FunctionRollbackEvent {
+                function: info.function.clone(),
                 failure: "panic",
                 transaction: status.clone(),
             });
@@ -141,8 +141,8 @@ where
             let rollback =
                 info.attribute.rollback_on_type(Some(&application as &dyn Any), TypeId::of::<E>(), type_name::<E>());
             let completed = if rollback {
-                registry().publish_rollback(&MethodRollbackEvent {
-                    method: info.joinpoint_identification.clone(),
+                registry().publish_rollback(&FunctionRollbackEvent {
+                    function: info.function.clone(),
                     failure: type_name::<E>(),
                     transaction: status.clone(),
                 });
