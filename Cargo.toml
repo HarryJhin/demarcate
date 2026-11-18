@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/dtx-core"]
+members = ["crates/dtx-core", "crates/dtx-sqlx"]
 
 [workspace.package]
 version = "0.0.0"
@@ -10,3 +10,4 @@ publish = false
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 tracing = "0.1"
+sqlx = { version = "0.9", default-features = false }

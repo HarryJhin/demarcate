@@ -5,6 +5,7 @@ use crate::definition::{DefaultTransactionDefinition, TransactionDefinition};
 use crate::error::TransactionError;
 use crate::manager::PlatformTransactionManager;
 use crate::status::TransactionStatus;
+use crate::synchronization::TransactionSynchronizationManager;
 
 #[derive(Debug)]
 pub enum TemplateError<E> {
@@ -59,20 +60,26 @@ impl TransactionTemplate {
         F: FnOnce(Arc<dyn TransactionStatus>) -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        let status =
-            self.transaction_manager.get_transaction(Some(&self.definition)).await.map_err(TemplateError::Transaction)?;
-        match action(status.clone()).await {
-            Ok(value) => {
-                self.transaction_manager.commit(status.as_ref()).await.map_err(TemplateError::Transaction)?;
-                Ok(value)
-            }
-            Err(application) => match self.transaction_manager.rollback(status.as_ref()).await {
-                Ok(()) => Err(TemplateError::Application(application)),
-                Err(rollback) => {
-                    tracing::error!(error = %rollback, "Application exception overridden by rollback exception");
-                    Err(TemplateError::Rollback { application, rollback })
+        TransactionSynchronizationManager::ensure_scope(async {
+            let status = self
+                .transaction_manager
+                .get_transaction(Some(&self.definition))
+                .await
+                .map_err(TemplateError::Transaction)?;
+            match action(status.clone()).await {
+                Ok(value) => {
+                    self.transaction_manager.commit(status.as_ref()).await.map_err(TemplateError::Transaction)?;
+                    Ok(value)
                 }
-            },
-        }
+                Err(application) => match self.transaction_manager.rollback(status.as_ref()).await {
+                    Ok(()) => Err(TemplateError::Application(application)),
+                    Err(rollback) => {
+                        tracing::error!(error = %rollback, "Application exception overridden by rollback exception");
+                        Err(TemplateError::Rollback { application, rollback })
+                    }
+                },
+            }
+        })
+        .await
     }
 }
