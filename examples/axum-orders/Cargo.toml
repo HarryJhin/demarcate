@@ -1,9 +1,9 @@
 [package]
 name = "demarcate-example-axum-orders"
-version = "0.0.0"
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
 publish = false
 
 [dependencies]

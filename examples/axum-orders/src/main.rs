@@ -2,13 +2,14 @@ use demarcate_example_axum_orders::notification::Notifier;
 use demarcate_example_axum_orders::{http, migrate, order_service, transactional_pool};
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::broadcast::error::RecvError;
-use tower::limit::ConcurrencyLimitLayer;
+use tower::limit::GlobalConcurrencyLimitLayer;
 
 const MAX_CONNECTIONS: u32 = 20;
 
 // Placing an order holds two connections at one point: its own, and the one of the
 // `RequiresNew` audit entry. The server therefore handles at most half as many requests at a
-// time as the pool has connections; further requests wait for a free slot.
+// time as the pool has connections; further requests wait for a free slot. The limit is one
+// for all routes together.
 const MAX_CONCURRENT_REQUESTS: usize = (MAX_CONNECTIONS / 2) as usize;
 
 #[tokio::main]
@@ -37,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = transactional_pool(pg_pool);
     let router =
-        http::router(order_service(&pool, notifier)).layer(ConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS));
+        http::router(order_service(&pool, notifier)).layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS));
 
     let listener = tokio::net::TcpListener::bind(&address).await?;
     tracing::info!(%address, "listening");

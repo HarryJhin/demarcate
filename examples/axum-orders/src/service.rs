@@ -98,7 +98,7 @@ impl OrderService {
 
         let discount_cents = match &request.coupon {
             Some(code) => match self.coupon_service.redeem(code, order_id).await {
-                Ok(discount_cents) => discount_cents.clamp(0, subtotal_cents),
+                Ok(discount_cents) => discount_cents.min(subtotal_cents).max(0),
                 Err(Error::CouponRejected) => 0,
                 Err(error) => return Err(error),
             },
