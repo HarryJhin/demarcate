@@ -25,6 +25,7 @@ pub trait TransactionSynchronization: Send + Sync {
     fn resume(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async { Ok(()) })
     }
+    fn resume_abandoned(&self) {}
     fn flush(&self) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async { Ok(()) })
     }
@@ -105,6 +106,8 @@ struct State {
     scopes: Vec<u64>,
     poisoned: Vec<u64>,
     next_scope: u64,
+    polling: Vec<u64>,
+    current: Option<u64>,
 }
 
 tokio::task_local! {
@@ -117,13 +120,30 @@ const NO_CONTEXT: &str = "No transaction context is bound to the current task. C
      context of the task that spawned it; use demarcate_core::synchronization::spawn and open a new \
      transaction inside it";
 
+fn foreign(state: &State) -> bool {
+    state.polling.last().is_some_and(|innermost| state.current != Some(*innermost))
+}
+
 fn read<R>(default: R, f: impl FnOnce(&State) -> R) -> R {
-    STATE.try_with(|state| f(&state.borrow())).unwrap_or(default)
+    STATE
+        .try_with(|state| {
+            let state = state.borrow();
+            if foreign(&state) { None } else { Some(f(&state)) }
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(default)
 }
 
 fn write<R>(f: impl FnOnce(&mut State) -> Result<R, TransactionError>) -> Result<R, TransactionError> {
     STATE
-        .try_with(|state| f(&mut state.borrow_mut()))
+        .try_with(|state| {
+            let mut state = state.borrow_mut();
+            if foreign(&state) {
+                return Err(TransactionError::InvalidState(CONCURRENT.into()));
+            }
+            f(&mut state)
+        })
         .unwrap_or_else(|_| Err(TransactionError::InvalidState(NO_CONTEXT.into())))
 }
 
@@ -141,6 +161,55 @@ pub fn is_context_active() -> bool {
 
 pub async fn scope<F: Future>(future: F) -> F::Output {
     STATE.scope(RefCell::new(State::default()), future).await
+}
+
+pub(crate) const CONCURRENT: &str = "Another transactional call is already running on this task. Two \
+     transactional calls were started concurrently on one task (for example with join! or select!), and one \
+     task has one transaction context. Await transactional calls one after another, or run each in its own task \
+     with demarcate_core::synchronization::spawn";
+
+pub fn check_boundary_entry() -> Result<(), TransactionError> {
+    let concurrent = STATE.try_with(|state| foreign(&state.borrow())).unwrap_or(false);
+    if concurrent { Err(TransactionError::InvalidState(CONCURRENT.into())) } else { Ok(()) }
+}
+
+pub struct BoundaryScope<F> {
+    boundary: Option<u64>,
+    future: std::pin::Pin<Box<F>>,
+}
+
+pub fn boundary_scope<F: Future>(boundary: Option<u64>, future: F) -> BoundaryScope<F> {
+    if let Some(id) = boundary {
+        let _ = STATE.try_with(|state| state.borrow_mut().polling.push(id));
+    }
+    BoundaryScope { boundary, future: Box::pin(future) }
+}
+
+impl<F: Future> Future for BoundaryScope<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        let Some(id) = self.boundary else {
+            return self.future.as_mut().poll(cx);
+        };
+        let previous = STATE.try_with(|state| state.borrow_mut().current.replace(id)).ok().flatten();
+        struct Reset(Option<u64>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                let _ = STATE.try_with(|state| state.borrow_mut().current = self.0);
+            }
+        }
+        let _reset = Reset(previous);
+        self.future.as_mut().poll(cx)
+    }
+}
+
+impl<F> Drop for BoundaryScope<F> {
+    fn drop(&mut self) {
+        if let Some(id) = self.boundary {
+            let _ = STATE.try_with(|state| state.borrow_mut().polling.retain(|polling| *polling != id));
+        }
+    }
 }
 
 pub(crate) const OUT_OF_ORDER: &str = "Transaction boundaries on this task completed out of order. Two \
@@ -202,6 +271,9 @@ pub fn resource(key: &ResourceKey) -> Option<BoundResource> {
     STATE
         .try_with(|state| {
             let mut state = state.borrow_mut();
+            if foreign(&state) {
+                return None;
+            }
             let value = state.resources.get(key).cloned()?;
             if value.is_void() {
                 state.resources.remove(key);
@@ -377,6 +449,12 @@ impl TransactionSynchronization for SynchronizedResource {
                 None => Ok(()),
             })
         })
+    }
+    fn resume_abandoned(&self) {
+        let _ = write(|state| {
+            bind(state, self.key.clone(), self.value.clone());
+            Ok(())
+        });
     }
     fn after_completion(&self, _status: CompletionStatus) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async {

@@ -116,7 +116,14 @@ impl ConnectionHolder {
         self.savepoint_counter.store(0, Ordering::SeqCst);
     }
     async fn release_connection(&self) {
-        self.connection.lock().await.take();
+        match self.connection.try_lock() {
+            Ok(mut connection) => {
+                connection.take();
+            }
+            Err(_) => tracing::error!(
+                "A TransactionalConnection outlived its transaction; the connection is released when that handle is dropped"
+            ),
+        }
     }
     fn lock(&self) -> Result<OwnedMutexGuard<Option<Conn>>, TransactionError> {
         self.connection.clone().try_lock_owned().map_err(|_| {
@@ -154,12 +161,25 @@ impl ResourceHolder for ConnectionHolder {
 pub struct TransactionalPool {
     inner: PgPool,
     key: ResourceKey,
+    transaction_required: bool,
 }
 
 impl TransactionalPool {
     pub fn new(pool: PgPool) -> Self {
         let id = NEXT_POOL_ID.fetch_add(1, Ordering::SeqCst);
-        Self { inner: pool, key: ResourceKey::named(format!("demarcate-sqlx-postgres-{id}")) }
+        Self {
+            inner: pool,
+            key: ResourceKey::named(format!("demarcate-sqlx-postgres-{id}")),
+            transaction_required: false,
+        }
+    }
+
+    pub fn transaction_required(&self) -> Self {
+        Self { transaction_required: true, ..self.clone() }
+    }
+
+    pub fn is_transaction_required(&self) -> bool {
+        self.transaction_required
     }
 
     pub fn inner(&self) -> &PgPool {
@@ -188,10 +208,17 @@ impl TransactionalPool {
                     .into(),
             ));
         }
-        self.acquire().await
+        self.acquire_any().await
     }
 
     pub async fn acquire(&self) -> Result<TransactionalConnection, TransactionError> {
+        if self.transaction_required {
+            return self.acquire_in_transaction().await;
+        }
+        self.acquire_any().await
+    }
+
+    async fn acquire_any(&self) -> Result<TransactionalConnection, TransactionError> {
         if let Some(holder) = self.bound_holder() {
             let mut guard = holder.lock()?;
             if guard.is_none() {
@@ -239,15 +266,15 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
         'p: 'e,
         E: 'q + sqlx::Execute<'q, Postgres>,
     {
-        use futures_util::{StreamExt, TryStreamExt};
+        use futures_util::TryStreamExt;
         let pool = self.clone();
-        futures_util::stream::once(async move {
+        Box::pin(async_stream::try_stream! {
             let mut connection = pool.acquire().await.map_err(into_sqlx)?;
-            let items: Vec<_> = (&mut *connection).fetch_many(query).try_collect().await?;
-            Ok::<_, sqlx::Error>(futures_util::stream::iter(items.into_iter().map(Ok)))
+            let mut rows = (&mut *connection).fetch_many(query);
+            while let Some(step) = rows.try_next().await? {
+                yield step;
+            }
         })
-        .try_flatten()
-        .boxed()
     }
 
     fn fetch_optional<'e, 'q: 'e, E>(
@@ -377,6 +404,11 @@ impl TransactionSynchronization for ConnectionSynchronization {
             }
             Ok(())
         })
+    }
+    fn resume_abandoned(&self) {
+        if self.holder_active.load(Ordering::SeqCst) {
+            let _ = synchronization::bind_resource(self.key.clone(), BoundResource::holder(self.holder.clone()));
+        }
     }
     fn before_completion(&self) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async {

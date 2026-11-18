@@ -17,5 +17,6 @@ demarcate-sqlx = { path = "../demarcate-sqlx", optional = true, default-features
 
 [dev-dependencies]
 demarcate = { path = ".", features = ["sqlx-postgres"] }
+futures-util = "0.3"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

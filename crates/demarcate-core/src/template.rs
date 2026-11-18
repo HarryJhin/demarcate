@@ -77,7 +77,7 @@ impl TransactionTemplate {
                 .transaction(Some(&self.definition))
                 .await
                 .map_err(TemplateError::Transaction)?;
-            let outcome = match CatchUnwind::new(action(status.clone())).await {
+            let outcome = match CatchUnwind::new(synchronization::boundary_scope(status.boundary(), action(status.clone()))).await {
                 Ok(outcome) => outcome,
                 Err(panic) => {
                     if let Err(error) = self.transaction_manager.rollback(status.as_ref()).await {

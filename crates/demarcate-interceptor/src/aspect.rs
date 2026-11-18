@@ -99,10 +99,15 @@ where
     INFO.with(|stack| stack.borrow_mut().push(info.clone()));
     let restore = Restore(info.clone());
 
-    let outcome = CatchUnwind::boxed(invocation).await;
+    let outcome = CatchUnwind::new(synchronization::boundary_scope(status.boundary(), invocation)).await;
 
     match outcome {
         Err(panic) => {
+            registry().publish_rollback(&MethodRollbackEvent {
+                method: info.joinpoint_identification.clone(),
+                failure: "panic",
+                transaction: status.clone(),
+            });
             if let Err(error) = manager.rollback(status.as_ref()).await {
                 tracing::error!(%error, "Application panic overridden by rollback error");
             }

@@ -13,6 +13,7 @@ struct Arguments {
     isolation: Option<Ident>,
     timeout: Option<LitInt>,
     read_only: Option<bool>,
+    skip: bool,
     rollback_for: Vec<Type>,
     no_rollback_for: Vec<Type>,
     rollback_for_name: Vec<LitStr>,
@@ -45,6 +46,7 @@ impl Arguments {
                 self.read_only =
                     Some(if meta.input.peek(Token![=]) { meta.value()?.parse::<LitBool>()?.value } else { true })
             }
+            "skip" => self.skip = true,
             "rollback_for" => self.rollback_for = list(&meta)?,
             "no_rollback_for" => self.no_rollback_for = list(&meta)?,
             "rollback_for_name" => self.rollback_for_name = list(&meta)?,
@@ -56,7 +58,7 @@ impl Arguments {
             _ => {
                 return Err(meta.error(
                     "unknown #[transactional] attribute; expected one of: propagation, isolation, timeout, \
-                     read_only, rollback_for, no_rollback_for, rollback_for_name, no_rollback_for_name, \
+                     read_only, skip, rollback_for, no_rollback_for, rollback_for_name, no_rollback_for_name, \
                      rollback_if, no_rollback_if, transaction_manager, label",
                 ));
             }
@@ -153,6 +155,12 @@ fn not_async(sig: &Signature) -> TokenStream {
     .into()
 }
 
+fn returns_result(sig: &Signature) -> bool {
+    let syn::ReturnType::Type(_, ty) = &sig.output else { return false };
+    let syn::Type::Path(path) = ty.as_ref() else { return false };
+    path.path.segments.last().is_some_and(|segment| segment.ident.to_string().ends_with("Result"))
+}
+
 fn has_transactional_attribute(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| attr.path().segments.last().is_some_and(|segment| segment.ident == "transactional"))
 }
@@ -164,7 +172,7 @@ fn transactional_impl(attribute: &TokenStream2, mut item: ItemImpl) -> TokenStre
         if method.sig.asyncness.is_none() || has_transactional_attribute(&method.attrs) {
             continue;
         }
-        if !matches!(method.vis, syn::Visibility::Public(_)) && item.trait_.is_none() {
+        if !returns_result(&method.sig) {
             continue;
         }
         let wrapped = wrap(attribute, Some(&owner), &method.sig, &method.block);
@@ -182,6 +190,7 @@ pub fn transactional(arguments: TokenStream, item: TokenStream) -> TokenStream {
 
     match parse_macro_input!(item as Item) {
         Item::Impl(item) => transactional_impl(&attribute, item),
+        Item::Fn(function) if parsed.skip => quote! { #function }.into(),
         Item::Fn(ItemFn { attrs, vis, sig, block }) => {
             if sig.asyncness.is_none() {
                 return not_async(&sig);

@@ -188,6 +188,15 @@ impl Ledger {
         Ok(())
     }
 
+    #[transactional(skip)]
+    pub async fn outside(&self) -> Result<bool, AppError> {
+        Ok(demarcate::current_transaction_info().is_some())
+    }
+
+    pub async fn describe(&self) -> String {
+        "ledger".to_owned()
+    }
+
     pub fn name(&self) -> &'static str {
         "ledger"
     }
@@ -211,6 +220,25 @@ async fn type_level_declaration_applies_to_public_async_methods() {
     assert!(!definition.read_only);
 
     ledger.private_helper().await.unwrap();
+    assert_eq!(tm.counts(), [3, 3, 0], "visibility does not exclude a method");
+
+    assert!(!ledger.outside().await.unwrap(), "skip keeps a method outside the declaration");
+    assert_eq!(ledger.describe().await, "ledger");
     assert_eq!(ledger.name(), "ledger");
-    assert_eq!(tm.counts(), [2, 2, 0], "private and non-async methods are not transactional");
+    assert_eq!(tm.counts(), [3, 3, 0], "skipped, non-Result and non-async methods are not transactional");
+}
+
+#[transactional(transaction_manager = "macro-precedence", rollback_for = [AppError], no_rollback_if = is_warning)]
+async fn fails_with_type_and_value_rules(message: &'static str) -> Result<(), AppError> {
+    Err(AppError::Business(message))
+}
+
+#[tokio::test]
+async fn value_rule_is_more_specific_than_type_rule() {
+    let tm = CallCountingTransactionManager::new();
+    registry().register("macro-precedence", tm.clone());
+    assert!(fails_with_type_and_value_rules("warning").await.is_err());
+    assert_eq!(tm.counts(), [1, 1, 0]);
+    assert!(fails_with_type_and_value_rules("failed").await.is_err());
+    assert_eq!(tm.counts(), [2, 1, 1]);
 }

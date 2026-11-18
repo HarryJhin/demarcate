@@ -38,12 +38,21 @@ impl Repository {
     }
 
     async fn insert_strict(&self, value: &str) -> Result<(), ServiceError> {
-        let mut connection = self.pool.acquire_in_transaction().await?;
         sqlx::query(AssertSqlSafe(format!("insert into {} values($1)", self.table)))
             .bind(value.to_owned())
-            .execute(&mut *connection)
+            .execute(&self.pool.transaction_required())
             .await?;
         Ok(())
+    }
+
+    async fn stream_values(&self) -> Result<Vec<String>, ServiceError> {
+        use futures_util::TryStreamExt;
+        let mut rows = sqlx::query(AssertSqlSafe(format!("select v from {} order by v", self.table))).fetch(&self.pool);
+        let mut values = Vec::new();
+        while let Some(row) = rows.try_next().await? {
+            values.push(row.get::<String, _>(0));
+        }
+        Ok(values)
     }
 
     async fn read_only_setting(&self) -> Result<String, ServiceError> {
@@ -98,6 +107,14 @@ impl Service {
     #[transactional(read_only)]
     async fn read_only_setting(&self) -> Result<String, ServiceError> {
         self.repository.read_only_setting().await
+    }
+
+    #[transactional]
+    async fn register_many_and_read(&self, values: &[&str]) -> Result<Vec<String>, ServiceError> {
+        for value in values {
+            self.repository.insert_strict(value).await?;
+        }
+        self.repository.stream_values().await
     }
 
     #[transactional(propagation = Mandatory)]
@@ -165,12 +182,17 @@ async fn declarative_transactions_on_postgres() {
 
     reset(service).await;
     match service.repository.insert_strict("a").await {
-        Err(ServiceError::Transaction(TransactionError::NoTransaction(message))) => {
-            assert!(message.contains("acquire_in_transaction"), "{message}");
+        Err(ServiceError::Sql(error)) => {
+            assert!(error.to_string().contains("No transaction is active"), "{error}");
         }
         other => panic!("unexpected result: {other:?}"),
     }
     assert!(service.repository.rows().await.is_empty());
+
+    reset(service).await;
+    let read = service.register_many_and_read(&["x", "y", "z"]).await.unwrap();
+    assert_eq!(read, ["x", "y", "z"], "a stream reads the uncommitted rows of its own transaction");
+    assert_eq!(service.repository.rows().await, ["x", "y", "z"]);
 
     reset(service).await;
     service.repository.insert("auto-commit").await.unwrap();

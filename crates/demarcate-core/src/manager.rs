@@ -75,6 +75,7 @@ impl<D: TransactionDriver> SuspendedResourcesHolder<D> {
             synchronization::set_current_transaction_name(self.name);
             if synchronization::init_synchronization().is_ok() {
                 for suspended in suspended_synchronizations {
+                    suspended.resume_abandoned();
                     let _ = synchronization::register_synchronization(suspended);
                 }
             }
@@ -131,6 +132,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
     ) -> Result<Status<D>, TransactionError> {
         let defaults = TransactionDefinition::default();
         let def = definition.unwrap_or(&defaults);
+        synchronization::check_boundary_entry()?;
         let transaction = self.driver.transaction(&self.settings)?;
 
         if self.driver.is_existing_transaction(&transaction) {
@@ -302,6 +304,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
             nested,
             definition.read_only,
             suspended,
+            self.settings.global_rollback_on_participation_failure,
         ))
     }
 

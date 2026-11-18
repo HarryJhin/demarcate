@@ -63,6 +63,13 @@ impl RollbackRule {
         Self { matcher: Matcher::Pattern(pattern), rollback }
     }
 
+    fn specificity(&self) -> u8 {
+        match self.matcher {
+            Matcher::Predicate { .. } => 0,
+            Matcher::Type { .. } | Matcher::Pattern(_) => 1,
+        }
+    }
+
     pub fn is_rollback(&self) -> bool {
         self.rollback
     }
@@ -140,11 +147,11 @@ impl TransactionAttribute {
 
     pub fn rollback_on_type(&self, error: Option<&dyn Any>, error_type: TypeId, error_type_name: &str) -> bool {
         let mut winner: Option<&RollbackRule> = None;
-        let mut deepest = i32::MAX;
+        let mut deepest = (i32::MAX, u8::MAX);
         for rule in &self.rollback_rules {
             let depth = rule.depth(error, error_type, error_type_name);
-            if depth >= 0 && depth < deepest {
-                deepest = depth;
+            if depth >= 0 && (depth, rule.specificity()) < deepest {
+                deepest = (depth, rule.specificity());
                 winner = Some(rule);
             }
         }

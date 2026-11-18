@@ -131,39 +131,124 @@ async fn transaction_template_with_error() {
     con.log.verify("close");
 }
 
+fn assert_concurrent<T: std::fmt::Debug>(result: Result<T, TransactionError>) {
+    match result {
+        Err(TransactionError::InvalidState(message)) => {
+            assert!(message.contains("already running on this task"), "{message}");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
 #[tokio::test]
-async fn concurrent_boundaries_on_one_task_fail_loudly() {
+async fn concurrent_call_on_one_task_is_rejected_at_entry() {
     scoped(async {
         let con = Con::new();
         let ds = &MockDataSource::returning(&[&con]);
         let tm = &manager(ds);
         let tt = &template(tm, TransactionDefinition::new());
 
-        let first = execute(tt, |_status| async move {
+        let first = execute(tt, |status| async move {
+            assert!(status.is_new_transaction());
             tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(has_resource(ds));
             Ok(())
         });
         let second = async {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            execute(tt, |status| async move {
-                assert!(!status.is_new_transaction());
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                Ok(())
-            })
-            .await
+            assert!(!has_resource(ds), "a sibling future does not see the other call's transaction");
+            assert!(!tsm::is_actual_transaction_active());
+            execute(tt, |_status| async move { Ok(()) }).await
         };
         let (first, second) = tokio::join!(first, second);
 
-        for result in [first, second] {
-            match result {
-                Err(TransactionError::InvalidState(message)) => {
-                    assert!(message.contains("out of order"), "{message}");
-                }
-                other => panic!("unexpected result: {other:?}"),
-            }
-        }
-        con.log.verify_times("commit", 0);
-        con.log.verify("rollback");
+        first.unwrap();
+        assert_concurrent(second);
+        con.log.verify("commit");
+        con.log.verify_times("rollback", 0);
+        assert!(!has_resource(ds));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn concurrent_requires_new_that_would_finish_first_is_rejected() {
+    scoped(async {
+        let con1 = Con::new();
+        let con2 = Con::new();
+        let ds = &MockDataSource::returning(&[&con1, &con2]);
+        let tm = &manager(ds);
+        let tt = &template(tm, def(Propagation::RequiresNew));
+
+        let slow = execute(tt, |_status| async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            Ok(())
+        });
+        let fast = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            execute(tt, |_status| async move { Ok(()) }).await
+        };
+        let (slow, fast) = tokio::join!(slow, fast);
+
+        slow.unwrap();
+        assert_concurrent(fast);
+        con1.log.verify("commit");
+        con2.log.verify_no_interactions();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn concurrent_requires_new_inside_a_transaction_keeps_the_outer_transaction() {
+    scoped(async {
+        let con1 = &Con::new();
+        let con2 = &Con::new();
+        let ds = &MockDataSource::returning(&[con1, con2]);
+        let tm = &manager(ds);
+        let outer = template(tm, TransactionDefinition::new());
+
+        execute(&outer, |_status| async move {
+            let inner = &template(tm, def(Propagation::RequiresNew));
+            let first = execute(inner, |_inner| async move {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Ok(())
+            });
+            let second = async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                execute(inner, |_inner| async move { Ok(()) }).await
+            };
+            let (first, second) = tokio::join!(first, second);
+            first?;
+            assert_concurrent(second);
+            assert!(con1.is(&utils::connection(ds).await?), "the outer transaction is bound again");
+            assert!(tsm::is_actual_transaction_active());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        con1.log.verify("commit");
+        con2.log.verify("commit");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn select_loser_does_not_break_the_winner() {
+    scoped(async {
+        let con = Con::new();
+        let ds = &MockDataSource::returning(&[&con]);
+        let tm = &manager(ds);
+        let tt = &template(tm, TransactionDefinition::new());
+
+        let winner = tokio::select! {
+            result = execute(tt, |_status| async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok("transaction")
+            }) => result,
+            _ = tokio::time::sleep(Duration::from_secs(5)) => Ok("timer"),
+        };
+        assert_eq!(winner.unwrap(), "transaction");
+        con.log.verify("commit");
         assert!(!has_resource(ds));
     })
     .await;

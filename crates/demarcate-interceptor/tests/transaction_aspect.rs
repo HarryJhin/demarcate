@@ -175,6 +175,30 @@ async fn panic_rolls_back_and_propagates() {
     assert_eq!(tm.counts(), [1, 0, 1]);
 }
 
+#[tokio::test]
+async fn panic_publishes_method_rollback_event() {
+    let seen: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::default();
+    let sink = seen.clone();
+    demarcate_interceptor::registry().add_rollback_listener(move |event| {
+        if event.method == "test::panic_event" {
+            sink.lock().unwrap().push(event.failure);
+        }
+    });
+    let tm = CallCountingTransactionManager::new();
+    let joined = tokio::spawn(async move {
+        invoke_with_manager(tm, TransactionAttribute::new(), "test::panic_event", async {
+            if true {
+                panic!("boom");
+            }
+            Ok::<_, AppError>(())
+        })
+        .await
+    })
+    .await;
+    assert!(joined.unwrap_err().is_panic());
+    assert_eq!(*seen.lock().unwrap(), ["panic"]);
+}
+
 #[test]
 fn determine_transaction_manager_with_qualifier_unknown() {
     let registry = TransactionManagerRegistry::new();

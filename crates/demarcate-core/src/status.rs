@@ -50,6 +50,9 @@ pub trait TransactionStatus: TransactionExecution + SavepointManager + Any {
     fn flush(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async { Ok(()) })
     }
+    fn boundary(&self) -> Option<u64> {
+        None
+    }
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -133,6 +136,7 @@ pub struct ManagedTransactionStatus<D: TransactionDriver> {
     completed: AtomicBool,
     savepoint: Mutex<Option<Savepoint>>,
     boundary: Option<u64>,
+    rollback_only_when_abandoned: bool,
 }
 
 impl<D: TransactionDriver> ManagedTransactionStatus<D> {
@@ -146,6 +150,7 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
         nested: bool,
         read_only: bool,
         suspended_resources: Option<SuspendedResourcesHolder<D>>,
+        rollback_only_when_abandoned: bool,
     ) -> Self {
         Self {
             driver,
@@ -160,6 +165,7 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
             completed: AtomicBool::new(false),
             savepoint: Mutex::new(None),
             boundary: synchronization::enter_boundary(),
+            rollback_only_when_abandoned,
         }
     }
 
@@ -301,6 +307,9 @@ impl<D: TransactionDriver> TransactionStatus for ManagedTransactionStatus<D> {
             }
         })
     }
+    fn boundary(&self) -> Option<u64> {
+        self.boundary
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -318,7 +327,9 @@ impl<D: TransactionDriver> Drop for ManagedTransactionStatus<D> {
         if let Some(transaction) = &self.transaction {
             if self.new_transaction {
                 self.driver.abandon(transaction);
-            } else if let Err(error) = self.driver.set_rollback_only(transaction) {
+            } else if self.rollback_only_when_abandoned
+                && let Err(error) = self.driver.set_rollback_only(transaction)
+            {
                 tracing::debug!(%error, "Could not mark the abandoned participating transaction as rollback-only");
             }
         }
