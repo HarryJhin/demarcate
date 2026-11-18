@@ -253,3 +253,16 @@ async fn select_loser_does_not_break_the_winner() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn binding_over_an_existing_resource_keeps_the_existing_one() {
+    tsm::scope(async {
+        let key = tsm::ResourceKey::named("resource");
+        tsm::bind_resource(key.clone(), tsm::BoundResource::value(std::sync::Arc::new(1_u32))).unwrap();
+        assert!(tsm::bind_resource(key.clone(), tsm::BoundResource::value(std::sync::Arc::new(2_u32))).is_err());
+        let bound = tsm::resource(&key).unwrap().downcast::<u32>().unwrap();
+        assert_eq!(*bound, 1);
+        tsm::unbind_resource(&key).unwrap();
+    })
+    .await;
+}

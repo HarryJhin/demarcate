@@ -205,6 +205,7 @@ impl TransactionalPool {
     }
 
     pub async fn acquire_in_transaction(&self) -> Result<TransactionalConnection, TransactionError> {
+        synchronization::check_access()?;
         if !self.bound_holder().is_some_and(|holder| holder.is_transaction_active()) {
             return Err(TransactionError::NoTransaction(
                 "No transaction is active for this pool on the current task. acquire_in_transaction() must be \
@@ -225,6 +226,8 @@ impl TransactionalPool {
     }
 
     async fn acquire_any(&self) -> Result<TransactionalConnection, TransactionError> {
+        synchronization::check_access()?;
+        let synchronized = synchronization::is_synchronization_active();
         if let Some(holder) = self.bound_holder() {
             let mut guard = holder.lock()?;
             if guard.is_none() {
@@ -236,7 +239,7 @@ impl TransactionalPool {
         }
 
         let connection = self.inner.acquire().await.map_err(cannot_get_connection)?;
-        if !synchronization::is_synchronization_active() {
+        if !synchronized {
             return Ok(TransactionalConnection(Handle::Standalone(connection)));
         }
 

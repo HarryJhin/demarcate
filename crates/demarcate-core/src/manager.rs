@@ -129,7 +129,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
     pub async fn status(&self, definition: Option<&TransactionDefinition>) -> Result<Status<D>, TransactionError> {
         let defaults = TransactionDefinition::default();
         let def = definition.unwrap_or(&defaults);
-        synchronization::check_boundary_entry()?;
+        synchronization::check_access()?;
         let transaction = self.driver.transaction(&self.settings)?;
 
         if self.driver.is_existing_transaction(&transaction) {

@@ -30,6 +30,7 @@ pub fn current_transaction_info() -> Option<Arc<TransactionInfo>> {
 }
 
 pub fn current_transaction_status() -> Result<Arc<dyn TransactionStatus>, TransactionError> {
+    demarcate_core::synchronization::check_access()?;
     current_transaction_info().map(|info| info.status.clone()).ok_or_else(|| {
         TransactionError::NoTransaction(
             "No transaction aspect-managed TransactionStatus in scope. current_transaction_status() works only \

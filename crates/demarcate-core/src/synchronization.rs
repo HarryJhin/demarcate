@@ -148,7 +148,11 @@ fn write<R>(f: impl FnOnce(&mut State) -> Result<R, TransactionError>) -> Result
 }
 
 fn bind(state: &mut State, key: ResourceKey, value: BoundResource) -> Option<BoundResource> {
-    state.resources.insert(key, value).filter(|old| !old.is_void())
+    if let Some(existing) = state.resources.get(&key).filter(|existing| !existing.is_void()) {
+        return Some(existing.clone());
+    }
+    state.resources.insert(key, value);
+    None
 }
 
 fn unbind(state: &mut State, key: &ResourceKey) -> Option<BoundResource> {
@@ -163,12 +167,12 @@ pub async fn scope<F: Future>(future: F) -> F::Output {
     STATE.scope(RefCell::new(State::default()), future).await
 }
 
-pub(crate) const CONCURRENT: &str = "Another transactional call is already running on this task. Two \
-     transactional calls were started concurrently on one task (for example with join! or select!), and one \
-     task has one transaction context. Await transactional calls one after another, or run each in its own task \
-     with demarcate_core::synchronization::spawn";
+pub(crate) const CONCURRENT: &str = "A transactional call is already running on this task and this future runs beside \
+     it (for example in join! or select!). One task has one transaction context, and while that call runs the \
+     context belongs to it, so this future can neither join its caller's transaction nor start one. Await the \
+     two one after another, or run one of them in its own task with demarcate_core::synchronization::spawn";
 
-pub fn check_boundary_entry() -> Result<(), TransactionError> {
+pub fn check_access() -> Result<(), TransactionError> {
     let concurrent = STATE.try_with(|state| foreign(&state.borrow())).unwrap_or(false);
     if concurrent { Err(TransactionError::InvalidState(CONCURRENT.into())) } else { Ok(()) }
 }
