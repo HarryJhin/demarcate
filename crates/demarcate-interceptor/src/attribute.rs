@@ -157,8 +157,8 @@ pub struct TransactionAttribute {
     /// Free-form labels for this function. The library does not interpret them; a custom transaction
     /// manager or listener can.
     pub labels: Vec<String>,
-    /// A description of the function for logs and for the transaction name. The default is the path
-    /// of the function.
+    /// A description of the function. When set, it replaces the path of the function as the name of
+    /// the transaction and in [`MethodRollbackEvent`](crate::MethodRollbackEvent).
     pub descriptor: Option<String>,
 }
 

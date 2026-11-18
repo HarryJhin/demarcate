@@ -14,8 +14,9 @@ use crate::unwind::CatchUnwind;
 pub enum TemplateError<E> {
     /// The action returned this error and the transaction was rolled back.
     Application(E),
-    /// The transaction could not be started or committed. The action either did not run or returned
-    /// `Ok`.
+    /// The transaction could not be started or completed. The action either did not run or returned
+    /// `Ok`. Note that when the error comes from an `after_commit` callback, the transaction is
+    /// committed.
     Transaction(TransactionError),
     /// The action returned an error and the rollback failed as well.
     Rollback {
@@ -125,7 +126,7 @@ impl TransactionTemplate {
                 Ok(outcome) => outcome,
                 Err(panic) => {
                     if let Err(error) = self.transaction_manager.rollback(status.as_ref()).await {
-                        tracing::error!(%error, "Application panic overridden by rollback error");
+                        tracing::error!(%error, "The rollback after a panic failed");
                     }
                     std::panic::resume_unwind(panic)
                 }
@@ -138,7 +139,7 @@ impl TransactionTemplate {
                 Err(application) => match self.transaction_manager.rollback(status.as_ref()).await {
                     Ok(()) => Err(TemplateError::Application(application)),
                     Err(rollback) => {
-                        tracing::error!(error = %rollback, "Application exception overridden by rollback exception");
+                        tracing::error!(error = %rollback, "The rollback after an application error failed");
                         Err(TemplateError::Rollback { application, rollback })
                     }
                 },

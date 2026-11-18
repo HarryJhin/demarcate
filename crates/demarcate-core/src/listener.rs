@@ -9,15 +9,20 @@ use crate::status::TransactionExecution;
 /// one particular transaction, register a
 /// [`TransactionSynchronization`](crate::TransactionSynchronization) instead.
 ///
-/// The callbacks run only for a call that starts or completes an actual transaction or a nested
-/// one. A call that joins an existing transaction triggers none of them. Every method has an empty
-/// default implementation.
+/// The begin and commit callbacks run only for a call that starts an actual transaction or a
+/// nested one; a call that joins an existing transaction triggers none of them. When a commit
+/// fails and the manager rolls the transaction back, `after_rollback` is called instead of
+/// `after_commit`, without a preceding `before_rollback`, and a call that joined the transaction
+/// can receive it too.
+///
+/// Every method has an empty default implementation.
 pub trait TransactionExecutionListener: Send + Sync {
     /// Called before the transaction begins.
     fn before_begin(&self, _transaction: &dyn TransactionExecution) {}
     /// Called after the transaction began, or failed to begin.
     ///
-    /// `begin_failure` is the error when the begin failed.
+    /// `begin_failure` is the error when the begin failed. Note that this is not called when the
+    /// transaction began and the synchronization scope could not be opened.
     fn after_begin(&self, _transaction: &dyn TransactionExecution, _begin_failure: Option<&TransactionError>) {}
     /// Called before the transaction commits.
     fn before_commit(&self, _transaction: &dyn TransactionExecution) {}

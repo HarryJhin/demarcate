@@ -45,7 +45,8 @@ const BESIDE_SAVEPOINT: &str = "A savepoint of another call is open on the conne
      own. Await the nested call before the other work, or give the other work its own transaction with \
      propagation = RequiresNew";
 
-/// The connection of one transaction, bound to the transaction context under the key of its pool.
+/// The connection of one transaction, or of one synchronization scope without a transaction,
+/// bound to the transaction context under the key of its pool.
 ///
 /// It keeps the connection, the rollback-only mark, the deadline and the open savepoints.
 /// Application code does not use it; it is public for code that inspects the context.
@@ -228,7 +229,7 @@ impl ConnectionHolder {
     fn lock(&self) -> Result<OwnedMutexGuard<Option<Conn>>, TransactionError> {
         self.connection.clone().try_lock_owned().map_err(|_| {
             TransactionError::InvalidState(
-                "The connection of the current transaction is already in use on this task. A \
+                "The connection of the current transaction is already in use. A \
                  TransactionalConnection returned by acquire() is still alive, or two queries of one transaction \
                  are awaited concurrently (join!, select!). Drop the connection before calling another \
                  transactional function, and await the queries of one transaction one after another"
@@ -264,8 +265,13 @@ impl ResourceHolder for ConnectionHolder {
 /// that transaction. Outside of one it runs on a pooled connection in autocommit mode, unless the
 /// pool was made with [`transaction_required`](TransactionalPool::transaction_required).
 ///
-/// The queries of one transaction run one after another. Awaiting two of them at once returns an
-/// error; it does not open a second connection.
+/// The queries of one transaction must be awaited one after another. Awaiting two of them at
+/// once returns an error; it does not open a second connection.
+///
+/// A transaction with a timeout sets `statement_timeout` to the remaining time before every
+/// query. A query that starts after the deadline fails with [`TransactionError::TimedOut`]; a
+/// query that is running at the deadline is cancelled by the server and fails with a database
+/// error. The commit does not check the deadline.
 ///
 /// A statement that fails inside a transaction is recorded. When the transactional function then
 /// returns `Ok`, the commit checks with the server and returns
@@ -333,12 +339,12 @@ impl TransactionalPool {
     /// # Errors
     ///
     /// Returns [`TransactionError::NoTransaction`] when the calling future runs in no transaction of
-    /// this pool.
+    /// this pool, and otherwise the errors of [`acquire`](TransactionalPool::acquire).
     pub async fn acquire_in_transaction(&self) -> Result<TransactionalConnection, TransactionError> {
         synchronization::check_access()?;
         if !self.bound_holder().is_some_and(|holder| holder.is_transaction_active()) {
             return Err(TransactionError::NoTransaction(
-                "No transaction is active for this pool on the current task. acquire_in_transaction() must be \
+                "No transaction is active for this pool in the calling future. acquire_in_transaction() must be \
                  called inside a #[transactional] function or TransactionTemplate::execute that uses this \
                  pool's transaction manager. A task created with tokio::spawn does not inherit the transaction; \
                  open a new one inside the spawned task, or use acquire() to run without a transaction"
@@ -360,7 +366,10 @@ impl TransactionalPool {
     /// # Errors
     ///
     /// Returns an error when the connection of the transaction is already in use, when a nested
-    /// transaction of another call owns it, or when no connection can be obtained.
+    /// transaction of another call owns it, when the transaction that the calling future joined has
+    /// completed, or when no connection can be obtained. Returns [`TransactionError::TimedOut`] when
+    /// the deadline of the transaction has passed, and [`TransactionError::NoTransaction`] when the
+    /// pool requires a transaction and none is running.
     pub async fn acquire(&self) -> Result<TransactionalConnection, TransactionError> {
         if self.transaction_required {
             return self.acquire_in_transaction().await;

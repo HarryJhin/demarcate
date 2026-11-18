@@ -18,7 +18,7 @@ struct Managers {
 /// [`TransactionManagerRegistry::add_rollback_listener`]. The event is published before the
 /// rollback happens.
 pub struct MethodRollbackEvent {
-    /// The path of the function.
+    /// The path of the function, or its descriptor when one is set.
     pub method: String,
     /// The type name of the error, or `"panic"`.
     pub failure: &'static str,
@@ -82,7 +82,7 @@ impl TransactionManagerRegistry {
             return managers.named.get(qualifier).cloned().ok_or_else(|| {
                 TransactionError::InvalidState(format!(
                     "No transaction manager is registered with qualifier '{qualifier}'. Register it with \
-                     demarcate_interceptor::registry().register(\"{qualifier}\", manager) before the first \
+                     demarcate::registry().register(\"{qualifier}\", manager) before the first \
                      #[transactional(transaction_manager = \"{qualifier}\")] call"
                 ))
             });
@@ -90,7 +90,7 @@ impl TransactionManagerRegistry {
         managers.default.clone().ok_or_else(|| {
             TransactionError::InvalidState(
                 "No default transaction manager is registered. Call \
-                 demarcate_interceptor::registry().set_default(manager) at application startup, or name one \
+                 demarcate::registry().set_default(manager) at application startup, or name one \
                  with #[transactional(transaction_manager = \"...\")]"
                     .into(),
             )

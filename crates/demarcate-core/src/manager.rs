@@ -10,18 +10,18 @@ use crate::listener::TransactionExecutionListener;
 use crate::status::{ManagedTransactionStatus, TransactionExecution, TransactionStatus};
 use crate::synchronization::{self, CompletionStatus, TransactionSynchronization};
 
-/// When a [`TransactionManager`] opens a synchronization scope, in which
+/// Selects the calls for which a [`TransactionManager`] opens a synchronization scope, in which
 /// [`TransactionSynchronization`] callbacks can be registered.
 ///
 /// The default is [`SynchronizationMode::Always`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SynchronizationMode {
-    /// For every call, also one that runs without a transaction.
+    /// Opens a scope for every call, including one that runs without a transaction.
     #[default]
     Always,
-    /// Only for a call that runs in an actual transaction.
+    /// Opens a scope only for a call that runs in an actual transaction.
     OnActualTransaction,
-    /// Never. Synchronization callbacks cannot be registered.
+    /// Opens no scope. Synchronization callbacks cannot be registered.
     Never,
 }
 
@@ -61,8 +61,10 @@ pub trait PlatformTransactionManager: Send + Sync {
     /// # Errors
     ///
     /// Returns [`TransactionError::UnexpectedRollback`] when the transaction was rolled back because
-    /// it was marked rollback-only by a call that joined it, and
-    /// [`TransactionError::System`] when the commit failed.
+    /// it was marked rollback-only by a call that joined it, and [`TransactionError::System`] when
+    /// the commit failed. Returns the error of a `before_commit` callback after rolling back, and
+    /// the error of an `after_commit` callback, in which case the transaction is committed. Returns
+    /// [`TransactionError::InvalidTransactionState`] when the status is already completed.
     fn commit<'a>(&'a self, status: &'a dyn TransactionStatus) -> BoxFuture<'a, Result<(), TransactionError>>;
 
     /// Rolls back the transaction of the given status.
@@ -72,6 +74,11 @@ pub trait PlatformTransactionManager: Send + Sync {
     /// resumes.
     ///
     /// Do not call this after `commit` returned an error; the transaction is already completed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactionError::InvalidTransactionState`] when the status is already completed,
+    /// and the error of the driver when the rollback fails.
     fn rollback<'a>(&'a self, status: &'a dyn TransactionStatus) -> BoxFuture<'a, Result<(), TransactionError>>;
 }
 
@@ -104,7 +111,9 @@ pub struct ManagerSettings {
     /// Whether a call that joined a transaction and fails marks the whole transaction rollback-only.
     ///
     /// The default is `true`. With `false`, the call that started the transaction decides, and can
-    /// commit after a joined call failed.
+    /// commit after a joined call failed. The setting does not apply to
+    /// [`set_rollback_only`](crate::TransactionExecution::set_rollback_only): a joined call that
+    /// calls it always marks the whole transaction.
     pub global_rollback_on_participation_failure: bool,
     /// Whether a call that joined a transaction gets
     /// [`TransactionError::UnexpectedRollback`] at its own end when the transaction is marked
@@ -298,7 +307,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
                         if let Err(resume_error) = self.resume(failed.transaction(), suspended).await {
                             tracing::error!(
                                 error = %begin_error,
-                                "Inner transaction begin exception overridden by outer transaction resume exception"
+                                "The error of the inner begin is replaced by an error of resuming the outer transaction"
                             );
                             return Err(resume_error);
                         }
@@ -739,7 +748,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
         }
         .await;
         if let Err(rollback_error) = attempt {
-            tracing::error!(error = %commit_error, "Commit exception overridden by rollback exception");
+            tracing::error!(error = %commit_error, "The commit error is replaced by an error of the rollback");
             self.trigger_after_completion(status, CompletionStatus::Unknown).await?;
             self.notify(|listener| listener.after_rollback(status, Some(&rollback_error)));
             return Err(rollback_error);

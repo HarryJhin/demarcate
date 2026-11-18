@@ -43,14 +43,18 @@ pub trait TransactionExecution: Send + Sync {
     fn is_read_only(&self) -> bool {
         false
     }
-    /// Marks the transaction so that its only possible outcome is a rollback.
+    /// Marks the transaction of this call so that it rolls back instead of committing.
     ///
     /// Use this to roll back without returning an error. The function then returns normally and the
-    /// transaction is rolled back when it would have been committed.
+    /// rollback happens when the call would have committed. In a nested call only the work since the
+    /// savepoint is rolled back. In a call that joined a transaction the whole transaction is marked,
+    /// and the call that started it gets
+    /// [`TransactionError::UnexpectedRollback`] when it tries to commit.
     ///
     /// # Errors
     ///
-    /// Returns an error when the transaction has already completed.
+    /// Returns an error when the transaction has already completed. The default implementation
+    /// always returns an error.
     fn set_rollback_only(&self) -> Result<(), TransactionError> {
         Err(TransactionError::InvalidState("This transaction status does not support set_rollback_only".into()))
     }
@@ -78,14 +82,26 @@ pub trait SavepointManager: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error when the transaction does not support savepoints or is marked rollback-only.
+    /// Returns [`TransactionError::NestedNotSupported`] when the call runs without a transaction or
+    /// the driver does not support savepoints. The PostgreSQL driver returns
+    /// [`TransactionError::CannotCreateTransaction`] when the transaction is marked rollback-only.
     fn create_savepoint(&self) -> BoxFuture<'_, Result<Savepoint, TransactionError>>;
     /// Rolls the transaction back to the given savepoint.
     ///
     /// The savepoint is not released by this; call
     /// [`release_savepoint`](SavepointManager::release_savepoint) afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactionError::NestedNotSupported`] when the transaction does not support
+    /// savepoints, and [`TransactionError::System`] when the database rejects the statement.
     fn rollback_to_savepoint<'a>(&'a self, savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>>;
     /// Releases the given savepoint. The work since the savepoint stays part of the transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactionError::NestedNotSupported`] when the transaction does not support
+    /// savepoints, and [`TransactionError::System`] when the database rejects the statement.
     fn release_savepoint<'a>(&'a self, savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>>;
 }
 
@@ -103,7 +119,11 @@ pub trait TransactionStatus: TransactionExecution + SavepointManager + Any {
         false
     }
     /// Flushes pending changes of the underlying session to the database, if the driver has such a
-    /// session.
+    /// session. Does nothing for a call that runs without a transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the driver or of a synchronization that failed to flush.
     fn flush(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async { Ok(()) })
     }
@@ -193,8 +213,10 @@ fn not_supported() -> TransactionError {
 /// It holds the transaction object of the driver, the resources of a transaction that this call
 /// suspended, and the savepoint of a nested call.
 ///
-/// When a status is dropped before it completed, because the call was cancelled, the transaction
-/// it started is rolled back, and a transaction it had joined is marked rollback-only.
+/// When the call is cancelled before the status completed, the transaction it started is rolled
+/// back. A transaction it had joined is marked rollback-only, unless
+/// [`ManagerSettings::global_rollback_on_participation_failure`](crate::ManagerSettings::global_rollback_on_participation_failure)
+/// is `false`.
 pub struct ManagedTransactionStatus<D: TransactionDriver> {
     driver: Arc<D>,
     transaction_name: Option<String>,

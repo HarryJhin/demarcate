@@ -45,7 +45,8 @@ pub enum TransactionError {
         message: String,
         /// The error of the database or the driver.
         source: Option<BoxError>,
-        /// The application error that was being handled when the transaction step failed.
+        /// An application error that a driver or a custom transaction manager attaches. The library
+        /// itself leaves it `None`.
         application: Option<BoxError>,
     },
     /// The deadline of the transaction passed.
@@ -67,11 +68,12 @@ pub enum TransactionError {
 }
 
 impl TransactionError {
-    /// Returns whether this error reports a failed transaction step, as opposed to a wrong use of
-    /// the context or an error from a callback.
+    /// Returns whether this error reports a failed transaction step.
     ///
-    /// The transaction manager uses this to decide how to complete a transaction whose commit
-    /// failed.
+    /// This is `false` for [`InvalidState`](TransactionError::InvalidState),
+    /// [`CannotGetConnection`](TransactionError::CannotGetConnection) and
+    /// [`Other`](TransactionError::Other), and `true` for every other variant. The transaction
+    /// manager uses it to decide how to complete a transaction whose commit failed.
     pub fn is_transaction_error(&self) -> bool {
         !matches!(self, Self::InvalidState(_) | Self::CannotGetConnection { .. } | Self::Other(_))
     }

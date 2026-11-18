@@ -44,8 +44,8 @@ pub fn current_transaction_info() -> Option<Arc<TransactionInfo>> {
 pub fn current_transaction_status() -> Result<Arc<dyn TransactionStatus>, TransactionError> {
     current_transaction_info().map(|info| info.status.clone()).ok_or_else(|| {
         TransactionError::NoTransaction(
-            "No transaction aspect-managed TransactionStatus in scope. current_transaction_status() works only \
-             inside a #[transactional] function"
+            "No #[transactional] function is running for the calling future. current_transaction_status() works \
+             only inside one"
                 .into(),
         )
     })
@@ -55,17 +55,22 @@ pub fn current_transaction_status() -> Result<Arc<dyn TransactionStatus>, Transa
 /// names in the global [`registry`](crate::registry).
 ///
 /// This is what `#[transactional]` expands to. `method_identification` is the path of the
-/// function; it becomes the name of the transaction.
+/// function. It becomes the name of the transaction, unless the attribute sets a descriptor or
+/// its definition sets a name.
 ///
 /// The transaction commits when the future returns `Ok`. When it returns `Err`, the rollback
-/// rules of the attribute decide between rollback and commit, and the error is returned. A panic
-/// rolls back and continues to unwind.
+/// rules of the attribute decide between rollback and commit, and the error is returned.
 ///
 /// # Errors
 ///
-/// Returns the error of the future, or a [`TransactionError`] converted into `E` when the
-/// transaction could not be started, committed or rolled back. An error of the completion
-/// replaces the error of the future, which is logged.
+/// Returns the error of the future, or a [`TransactionError`] converted into `E` when no
+/// transaction manager is registered for the attribute, or when the transaction could not be
+/// started, committed or rolled back. An error of the completion replaces the error of the
+/// future; the completion error is logged and the error of the future is dropped.
+///
+/// # Panics
+///
+/// A panic of the future rolls the transaction back and then continues to unwind.
 pub async fn invoke_within_transaction<T, E, Fut>(
     attribute: TransactionAttribute,
     method_identification: &str,
@@ -127,7 +132,7 @@ where
                 transaction: status.clone(),
             });
             if let Err(error) = manager.rollback(status.as_ref()).await {
-                tracing::error!(%error, "Application panic overridden by rollback error");
+                tracing::error!(%error, "The rollback after a panic failed");
             }
             drop(restore);
             resume_unwind(panic)
@@ -149,7 +154,7 @@ where
             match completed {
                 Ok(()) => Err(application),
                 Err(error) => {
-                    tracing::error!(%error, "Application exception overridden by transaction completion error");
+                    tracing::error!(%error, "The application error is replaced by an error of the transaction completion");
                     Err(E::from(error))
                 }
             }

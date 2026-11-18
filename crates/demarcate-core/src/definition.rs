@@ -16,7 +16,8 @@ pub enum Propagation {
     Required,
     /// Join the current transaction, or run without a transaction if there is none.
     ///
-    /// Without a transaction the call still opens a synchronization scope, so a connection obtained
+    /// With [`SynchronizationMode::Always`](crate::SynchronizationMode::Always), the default, the
+    /// call still opens a synchronization scope without a transaction, so a connection obtained
     /// inside it is reused until the call ends.
     Supports,
     /// Join the current transaction, and fail if there is none.
@@ -31,8 +32,15 @@ pub enum Propagation {
     /// The new transaction commits or rolls back on its own. Its outcome does not depend on the
     /// outcome of the suspended transaction, and the suspended transaction resumes when the call
     /// ends. A driver needs a second connection for the new transaction.
+    ///
+    /// Fails with [`TransactionError::SuspensionNotSupported`](crate::TransactionError::SuspensionNotSupported)
+    /// when a transaction is running and the driver cannot suspend one.
     RequiresNew,
-    /// Run without a transaction, and suspend the current one if there is one.
+    /// Run without a transaction, and suspend the current one if there is one. The suspended
+    /// transaction resumes when the call ends.
+    ///
+    /// Fails with [`TransactionError::SuspensionNotSupported`](crate::TransactionError::SuspensionNotSupported)
+    /// when a transaction is running and the driver cannot suspend one.
     NotSupported,
     /// Run without a transaction, and fail if one is running.
     ///
@@ -48,14 +56,17 @@ pub enum Propagation {
     ///
     /// The transaction manager must allow nested transactions; see
     /// [`ManagerSettings::nested_transaction_allowed`](crate::ManagerSettings::nested_transaction_allowed).
+    /// Otherwise the call fails with
+    /// [`TransactionError::NestedNotSupported`](crate::TransactionError::NestedNotSupported).
     Nested,
 }
 
 /// The isolation level of a transaction.
 ///
-/// The level applies only when the call starts a new transaction, that is with
-/// [`Propagation::Required`], [`Propagation::RequiresNew`] or [`Propagation::Nested`] without a
-/// current transaction. A call that joins a transaction keeps the level of that transaction.
+/// The level applies only when the call starts a new transaction: always with
+/// [`Propagation::RequiresNew`], and with [`Propagation::Required`] or [`Propagation::Nested`]
+/// when no transaction is running. A call that joins a transaction keeps the level of that
+/// transaction.
 ///
 /// The default is [`Isolation::Default`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -96,8 +107,11 @@ pub struct TransactionDefinition {
     ///
     /// This is a hint for the driver. A driver that cannot apply it ignores it.
     pub read_only: bool,
-    /// The name of the transaction, shown in logs and exposed as
-    /// [`synchronization::current_transaction_name`](crate::synchronization::current_transaction_name).
+    /// The name of the transaction, exposed as
+    /// [`synchronization::current_transaction_name`](crate::synchronization::current_transaction_name)
+    /// and [`TransactionExecution::transaction_name`](crate::TransactionExecution::transaction_name).
+    ///
+    /// `#[transactional]` sets it to the path of the function when it is `None`.
     pub name: Option<String>,
 }
 

@@ -50,8 +50,10 @@ pub trait TransactionDriver: Send + Sync + 'static {
 
     /// Starts a new transaction with the given definition and binds its resource to the context.
     ///
-    /// The manager calls this only when no transaction is running, or after it suspended the running
-    /// one. Apply the isolation level, the timeout and the read-only flag here.
+    /// The manager calls this when no transaction is running, after it suspended the running one, or
+    /// for a nested call when
+    /// [`use_savepoint_for_nested_transaction`](TransactionDriver::use_savepoint_for_nested_transaction)
+    /// returns `false`. Apply the isolation level, the timeout and the read-only flag here.
     ///
     /// # Errors
     ///
@@ -93,9 +95,12 @@ pub trait TransactionDriver: Send + Sync + 'static {
     }
 
     /// Returns whether the manager calls [`commit`](TransactionDriver::commit) on a transaction that
-    /// is marked rollback-only, leaving the decision to the resource.
+    /// a call which joined it marked rollback-only, leaving the decision to the resource.
     ///
-    /// The default is `false`: the manager rolls such a transaction back.
+    /// The default is `false`: the manager rolls such a transaction back. A status marked through
+    /// [`set_rollback_only`](crate::TransactionExecution::set_rollback_only) is rolled back in
+    /// either case. If the mark is still set after the commit, the manager returns
+    /// [`TransactionError::UnexpectedRollback`].
     fn should_commit_on_global_rollback_only(&self) -> bool {
         false
     }

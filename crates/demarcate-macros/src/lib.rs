@@ -230,8 +230,8 @@ fn transactional_impl(attribute: &TokenStream2, mut item: ItemImpl) -> TokenStre
 /// a method replaces the one on the block for that method. Methods that are not transactional
 /// go in a separate `impl` block. With `#[async_trait]`, put `#[transactional]` above it.
 ///
-/// A call applies to the function itself, so a call from another method of the same type is
-/// transactional too.
+/// The attribute changes the function itself, so a call from another method of the same type
+/// is transactional too.
 ///
 /// # Arguments
 ///
@@ -256,8 +256,13 @@ fn transactional_impl(attribute: &TokenStream2, mut item: ItemImpl) -> TokenStre
 /// transaction. A call that joins the transaction of its caller keeps the settings of that
 /// transaction.
 ///
+/// Each rule argument and `label` takes one value or a bracketed list. When an argument is
+/// written twice, the last one counts.
+///
 /// When rules disagree, a rule that tests the value (`rollback_if`, `no_rollback_if`) wins
-/// over a rule that names the type.
+/// over a rule that names the type. Among matching rules of the same kind, `rollback_for` and
+/// `rollback_for_name` win over their `no_rollback` counterparts, whatever the order of the
+/// arguments.
 ///
 /// # Examples
 ///

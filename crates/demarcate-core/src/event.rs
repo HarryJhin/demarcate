@@ -16,11 +16,13 @@ pub enum TransactionPhase {
     ///
     /// The transaction is over when the listener runs. Data access in the listener is not committed
     /// unless it runs in a [`Propagation::RequiresNew`](crate::Propagation::RequiresNew) transaction.
+    /// An error of the listener is logged and does not reach the caller.
     #[default]
     AfterCommit,
-    /// After a rollback.
+    /// After a rollback. An error of the listener is logged and does not reach the caller.
     AfterRollback,
-    /// After the transaction completed, whatever the outcome.
+    /// After the transaction completed, whatever the outcome. An error of the listener is logged and
+    /// does not reach the caller.
     AfterCompletion,
 }
 
@@ -64,11 +66,11 @@ impl TransactionSynchronization for TransactionalListenerSynchronization {
 
 /// Registers a listener that runs at the given phase of the current transaction.
 ///
-/// Returns `true` when the listener was registered or run, and `false` when no transaction is
-/// running and `fallback_execution` is `false`; the listener is then discarded.
+/// Returns `true` when the listener was registered or run. Returns `false` when no transaction
+/// with an active synchronization scope is running and `fallback_execution` is `false`; the
+/// listener is then discarded.
 ///
-/// With `fallback_execution` set to `true`, the listener runs immediately when no transaction is
-/// running.
+/// With `fallback_execution` set to `true`, the listener runs immediately in that case.
 ///
 /// The listener belongs to the transaction of the calling future. When that transaction rolls
 /// back, an [`AfterCommit`](TransactionPhase::AfterCommit) listener does not run.
@@ -98,7 +100,7 @@ where
     }
     if fallback_execution {
         if phase == TransactionPhase::AfterRollback {
-            tracing::warn!("Processing event after rollback as a fallback execution on AFTER_ROLLBACK phase");
+            tracing::warn!("Running an AfterRollback listener as a fallback although no transaction rolled back");
         }
         listener().await?;
         return Ok(true);

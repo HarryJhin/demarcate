@@ -274,3 +274,22 @@ async fn binding_over_an_existing_resource_keeps_the_existing_one() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn synchronized_resource_replaces_the_bound_one_until_completion() {
+    tsm::scope(async {
+        let key = tsm::ResourceKey::named("resource");
+        let bound = |key: &tsm::ResourceKey| *tsm::resource(key).unwrap().downcast::<u32>().unwrap();
+        tsm::bind_resource(key.clone(), tsm::BoundResource::value(std::sync::Arc::new(1_u32))).unwrap();
+        tsm::init_synchronization().unwrap();
+
+        tsm::bind_synchronized_resource(key.clone(), tsm::BoundResource::value(std::sync::Arc::new(2_u32))).unwrap();
+        assert_eq!(bound(&key), 2);
+
+        tsm::trigger_after_completion(demarcate_core::CompletionStatus::Committed).await.unwrap();
+        tsm::clear_synchronization().unwrap();
+        assert_eq!(bound(&key), 1);
+        tsm::unbind_resource(&key).unwrap();
+    })
+    .await;
+}
