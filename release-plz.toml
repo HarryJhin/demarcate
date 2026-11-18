@@ -1,0 +1,23 @@
+[workspace]
+# Versions come from git tags. Nothing is published to crates.io.
+git_only = true
+# Release only when a release pull request is merged.
+release_always = false
+dependencies_update = false
+# One tag, one GitHub release and one changelog for the workspace: see the `demarcate` package.
+git_tag_name = "v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+
+[[package]]
+name = "demarcate"
+git_tag_enable = true
+git_release_enable = true
+changelog_update = true
+changelog_path = "./CHANGELOG.md"
+changelog_include = ["demarcate-core", "demarcate-interceptor", "demarcate-macros", "demarcate-sqlx"]
+
+[[package]]
+name = "demarcate-example-axum-orders"
+release = false

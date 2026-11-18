@@ -1,0 +1,17 @@
+demarcate
+Copyright 2026 the demarcate authors
+
+This product is a Rust port of the transaction abstraction of the
+Spring Framework (https://spring.io/projects/spring-framework),
+version 7.0.10, module spring-tx, and of test scenarios from spring-tx
+and spring-jdbc.
+
+Spring Framework
+Copyright 2002-present the original author or authors.
+Licensed under the Apache License, Version 2.0.
+
+The names, structure and behaviour of the transaction definition,
+propagation, synchronization, transaction manager, transaction template,
+transaction attribute and rollback rule types follow the Spring source.
+"Spring" is a trademark of Broadcom Inc. and/or its subsidiaries. This
+project is not affiliated with or endorsed by the Spring project.

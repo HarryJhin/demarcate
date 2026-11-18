@@ -1,0 +1,46 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    name: tag and GitHub release
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'HarryJhin' }}
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - &checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - &toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-pr:
+    name: release pull request
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'HarryJhin' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - *checkout
+      - *toolchain
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
