@@ -77,6 +77,7 @@ impl TransactionTemplate {
                 .transaction(Some(&self.definition))
                 .await
                 .map_err(TemplateError::Transaction)?;
+            let _abandon = crate::AbandonOnDrop(status.clone());
             let outcome = match CatchUnwind::new(action(status.clone())).await {
                 Ok(outcome) => outcome,
                 Err(panic) => {

@@ -233,7 +233,6 @@ impl<D: TransactionDriver> TransactionManager<D> {
                         status.set_completed();
                         return Err(error);
                     }
-                    status.own_nested_transaction();
                     self.notify(|listener| listener.after_begin(status.as_ref(), None));
                     return Ok(status);
                 }

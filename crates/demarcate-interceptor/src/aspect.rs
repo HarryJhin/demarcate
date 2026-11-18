@@ -78,6 +78,7 @@ where
     }
 
     let status = manager.transaction(Some(&attribute.definition)).await?;
+    let _abandon = demarcate_core::AbandonOnDrop(status.clone());
     let info = Arc::new(TransactionInfo { attribute, joinpoint_identification, status: status.clone() });
     let restore = synchronization::attach_to_call(info.clone());
 

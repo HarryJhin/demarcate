@@ -50,6 +50,8 @@ pub trait TransactionStatus: TransactionExecution + SavepointManager + Any {
     fn flush(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async { Ok(()) })
     }
+    #[doc(hidden)]
+    fn abandon(&self) {}
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -133,7 +135,7 @@ pub struct ManagedTransactionStatus<D: TransactionDriver> {
     completed: AtomicBool,
     savepoint: Mutex<Option<Savepoint>>,
     frame: Mutex<Option<synchronization::Frame>>,
-    nested_owner: Mutex<Option<synchronization::NestedOwner>>,
+    abandoned: AtomicBool,
     rollback_only_when_abandoned: bool,
 }
 
@@ -163,7 +165,7 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
             completed: AtomicBool::new(false),
             savepoint: Mutex::new(None),
             frame: Mutex::new(None),
-            nested_owner: Mutex::new(None),
+            abandoned: AtomicBool::new(false),
             rollback_only_when_abandoned,
         }
     }
@@ -193,14 +195,30 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
     }
 
     pub(crate) fn release_frame(&self) {
-        let nested_owner = self.nested_owner.lock().expect("nested owner lock").take();
-        drop(nested_owner);
         let frame = self.frame.lock().expect("frame lock").take();
         drop(frame);
     }
 
-    pub(crate) fn own_nested_transaction(&self) {
-        *self.nested_owner.lock().expect("nested owner lock") = synchronization::enter_nested();
+    fn abandon_transaction(&self) {
+        if self.is_completed() || self.abandoned.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Some(transaction) = &self.transaction {
+            if let Some(savepoint) = self.held_savepoint() {
+                self.driver.abandon_savepoint(transaction, &savepoint);
+            }
+            if self.new_transaction {
+                self.driver.abandon(transaction);
+            } else if self.rollback_only_when_abandoned
+                && let Err(error) = self.driver.set_rollback_only(transaction)
+            {
+                tracing::debug!(%error, "Could not mark the abandoned participating transaction as rollback-only");
+            }
+        }
+        let suspended = self.take_suspended_resources();
+        drop(suspended);
+        self.set_completed();
+        self.release_frame();
     }
 
     pub(crate) fn has_suspended_resources(&self) -> bool {
@@ -324,6 +342,9 @@ impl<D: TransactionDriver> TransactionStatus for ManagedTransactionStatus<D> {
             }
         })
     }
+    fn abandon(&self) {
+        self.abandon_transaction();
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -331,17 +352,15 @@ impl<D: TransactionDriver> TransactionStatus for ManagedTransactionStatus<D> {
 
 impl<D: TransactionDriver> Drop for ManagedTransactionStatus<D> {
     fn drop(&mut self) {
-        if self.is_completed() {
-            return;
-        }
-        if let Some(transaction) = &self.transaction {
-            if self.new_transaction {
-                self.driver.abandon(transaction);
-            } else if self.rollback_only_when_abandoned
-                && let Err(error) = self.driver.set_rollback_only(transaction)
-            {
-                tracing::debug!(%error, "Could not mark the abandoned participating transaction as rollback-only");
-            }
-        }
+        self.abandon_transaction();
+    }
+}
+
+#[doc(hidden)]
+pub struct AbandonOnDrop(pub Arc<dyn TransactionStatus>);
+
+impl Drop for AbandonOnDrop {
+    fn drop(&mut self) {
+        self.0.abandon();
     }
 }

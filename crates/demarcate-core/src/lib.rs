@@ -17,6 +17,8 @@ pub use event::{TransactionPhase, on_transaction};
 pub use holder::ResourceHolderSupport;
 pub use listener::TransactionExecutionListener;
 pub use manager::{ManagerSettings, PlatformTransactionManager, SynchronizationMode, TransactionManager};
+#[doc(hidden)]
+pub use status::AbandonOnDrop;
 pub use status::{
     ManagedTransactionStatus, Savepoint, SavepointManager, SimpleTransactionStatus, TransactionExecution,
     TransactionStatus,

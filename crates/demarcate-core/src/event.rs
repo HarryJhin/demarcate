@@ -60,7 +60,7 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
 {
-    synchronization::check_open()?;
+    synchronization::check_access()?;
     if synchronization::is_synchronization_active() && synchronization::is_actual_transaction_active() {
         let listener: Listener = Box::new(move || Box::pin(listener()));
         synchronization::register_synchronization(Arc::new(TransactionalListenerSynchronization {

@@ -37,11 +37,18 @@ impl Conn {
     }
 }
 
+const BESIDE_SAVEPOINT: &str = "A savepoint of another call is open on the connection of this transaction. A \
+     nested transaction (propagation = Nested) runs on a savepoint, and until it completes the connection belongs to \
+     that call: a future beside it (for example in join! or select!) can neither query nor open a savepoint of its \
+     own. Await the nested call before the other work, or give the other work its own transaction with \
+     propagation = RequiresNew";
+
 pub struct ConnectionHolder {
     connection: Arc<tokio::sync::Mutex<Option<Conn>>>,
     synchronized_with_transaction: AtomicBool,
-    rollback_only: AtomicBool,
-    rollback_only_beside_nested: AtomicBool,
+    rollback_only_depth: Mutex<Option<usize>>,
+    aborted_depth: Mutex<Option<usize>>,
+    savepoints: Mutex<Vec<(String, u64)>>,
     transaction_active: AtomicBool,
     deadline: Mutex<Option<Instant>>,
     savepoint_counter: AtomicU32,
@@ -53,8 +60,9 @@ impl ConnectionHolder {
         Self {
             connection: Arc::new(tokio::sync::Mutex::new(Some(connection))),
             synchronized_with_transaction: AtomicBool::new(false),
-            rollback_only: AtomicBool::new(false),
-            rollback_only_beside_nested: AtomicBool::new(false),
+            rollback_only_depth: Mutex::new(None),
+            aborted_depth: Mutex::new(None),
+            savepoints: Mutex::new(Vec::new()),
             transaction_active: AtomicBool::new(false),
             deadline: Mutex::new(None),
             savepoint_counter: AtomicU32::new(0),
@@ -74,13 +82,56 @@ impl ConnectionHolder {
         self.transaction_active.store(value, Ordering::SeqCst);
     }
     pub fn set_rollback_only(&self) {
-        self.rollback_only.store(true, Ordering::SeqCst);
+        let depth = {
+            let savepoints = self.savepoints.lock().expect("savepoints lock");
+            savepoints.iter().take_while(|(_, owner)| synchronization::is_within_context(*owner)).count()
+        };
+        let mut marked = self.rollback_only_depth.lock().expect("rollback-only lock");
+        *marked = Some(marked.map_or(depth, |existing| existing.min(depth)));
     }
     pub fn reset_rollback_only(&self) {
-        self.rollback_only.store(false, Ordering::SeqCst);
+        *self.rollback_only_depth.lock().expect("rollback-only lock") = None;
     }
     pub fn is_rollback_only(&self) -> bool {
-        self.rollback_only.load(Ordering::SeqCst) || self.rollback_only_beside_nested.load(Ordering::SeqCst)
+        self.rollback_only_depth.lock().expect("rollback-only lock").is_some()
+    }
+    fn mark_aborted(&self) {
+        let depth = self.savepoints.lock().expect("savepoints lock").len();
+        let mut aborted = self.aborted_depth.lock().expect("aborted lock");
+        *aborted = Some(aborted.map_or(depth, |existing| existing.min(depth)));
+    }
+    fn is_aborted(&self) -> bool {
+        self.aborted_depth.lock().expect("aborted lock").is_some()
+    }
+    fn check_savepoint_owner(&self) -> Result<(), TransactionError> {
+        let owner = self.savepoints.lock().expect("savepoints lock").last().map(|(_, owner)| *owner);
+        match owner {
+            Some(owner) if !synchronization::is_within_context(owner) => {
+                Err(TransactionError::InvalidState(BESIDE_SAVEPOINT.into()))
+            }
+            _ => Ok(()),
+        }
+    }
+    fn savepoint_created(&self, name: &str) {
+        let owner = synchronization::context_id().unwrap_or(u64::MAX);
+        self.savepoints.lock().expect("savepoints lock").push((name.to_owned(), owner));
+    }
+    fn savepoint_rolled_back(&self, name: &str) {
+        let Some(index) = self.savepoint_index(name) else { return };
+        for marked in [&self.rollback_only_depth, &self.aborted_depth] {
+            let mut marked = marked.lock().expect("mark lock");
+            if marked.is_some_and(|depth| depth > index) {
+                *marked = None;
+            }
+        }
+    }
+    fn savepoint_gone(&self, name: &str) {
+        if let Some(index) = self.savepoint_index(name) {
+            self.savepoints.lock().expect("savepoints lock").truncate(index);
+        }
+    }
+    fn savepoint_index(&self, name: &str) -> Option<usize> {
+        self.savepoints.lock().expect("savepoints lock").iter().position(|(existing, _)| existing == name)
     }
     pub fn set_timeout(&self, timeout: Duration) {
         *self.deadline.lock().expect("deadline lock") = Some(Instant::now() + timeout);
@@ -120,7 +171,8 @@ impl ConnectionHolder {
     fn clear(&self) {
         self.set_synchronized_with_transaction(false);
         self.reset_rollback_only();
-        self.rollback_only_beside_nested.store(false, Ordering::SeqCst);
+        *self.aborted_depth.lock().expect("aborted lock") = None;
+        self.savepoints.lock().expect("savepoints lock").clear();
         *self.deadline.lock().expect("deadline lock") = None;
         self.set_transaction_active(false);
         self.savepoint_counter.store(0, Ordering::SeqCst);
@@ -233,7 +285,15 @@ impl TransactionalPool {
         synchronization::check_access()?;
         let synchronized = synchronization::is_synchronization_active();
         if let Some(holder) = self.bound_holder() {
-            let mut guard = holder.lock()?;
+            holder.check_savepoint_owner()?;
+            let mut guard = match holder.lock() {
+                Ok(guard) => guard,
+                Err(_) if !holder.is_transaction_active() => {
+                    let connection = self.inner.acquire().await.map_err(cannot_get_connection)?;
+                    return Ok(TransactionalConnection(Handle::Standalone(connection)));
+                }
+                Err(error) => return Err(error),
+            };
             if guard.is_none() {
                 *guard = Some(if holder.is_transaction_active() {
                     tracing::warn!(
@@ -291,9 +351,21 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
         let pool = self.clone();
         Box::pin(async_stream::try_stream! {
             let mut connection = pool.acquire().await.map_err(into_sqlx)?;
+            let transaction = connection.transaction_holder();
             let mut rows = (&mut *connection).fetch_many(query);
-            while let Some(step) = rows.try_next().await? {
-                yield step;
+            loop {
+                match rows.try_next().await {
+                    Ok(Some(step)) => yield step,
+                    Ok(None) => break,
+                    Err(error) => {
+                        if let Some(holder) = &transaction
+                            && error.as_database_error().is_some()
+                        {
+                            holder.mark_aborted();
+                        }
+                        Err(error)?;
+                    }
+                }
             }
         })
     }
@@ -309,7 +381,11 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
         let pool = self.clone();
         Box::pin(async move {
             let mut connection = pool.acquire().await.map_err(into_sqlx)?;
-            (&mut *connection).fetch_optional(query).await
+            let result = (&mut *connection).fetch_optional(query).await;
+            if let Err(error) = &result {
+                connection.statement_failed(error);
+            }
+            result
         })
     }
 
@@ -324,7 +400,11 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
         let pool = self.clone();
         Box::pin(async move {
             let mut connection = pool.acquire().await.map_err(into_sqlx)?;
-            (&mut *connection).prepare_with(sql, parameters).await
+            let result = (&mut *connection).prepare_with(sql, parameters).await;
+            if let Err(error) = &result {
+                connection.statement_failed(error);
+            }
+            result
         })
     }
 
@@ -338,7 +418,11 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
         let pool = self.clone();
         Box::pin(async move {
             let mut connection = pool.acquire().await.map_err(into_sqlx)?;
-            (&mut *connection).describe(sql).await
+            let result = (&mut *connection).describe(sql).await;
+            if let Err(error) = &result {
+                connection.statement_failed(error);
+            }
+            result
         })
     }
 }
@@ -368,6 +452,23 @@ enum Handle {
 }
 
 pub struct TransactionalConnection(Handle);
+
+impl TransactionalConnection {
+    fn transaction_holder(&self) -> Option<Arc<ConnectionHolder>> {
+        match &self.0 {
+            Handle::Held { holder, .. } if holder.is_transaction_active() => Some(holder.clone()),
+            _ => None,
+        }
+    }
+
+    fn statement_failed(&self, error: &sqlx::Error) {
+        if let Some(holder) = self.transaction_holder()
+            && error.as_database_error().is_some()
+        {
+            holder.mark_aborted();
+        }
+    }
+}
 
 impl Deref for TransactionalConnection {
     type Target = PgConnection;
@@ -497,15 +598,16 @@ fn begin_statement(definition: &TransactionDefinition) -> String {
 }
 
 async fn execute_on(holder: &ConnectionHolder, statement: String) -> Result<(), SavepointError> {
+    synchronization::check_access().map_err(SavepointError::State)?;
+    holder.check_savepoint_owner().map_err(SavepointError::State)?;
     let mut guard = holder.lock().map_err(SavepointError::State)?;
     let connection = guard
         .as_mut()
         .ok_or_else(|| SavepointError::State(TransactionError::Usage("Connection holder has no connection".into())))?;
-    sqlx::query(AssertSqlSafe(statement))
-        .execute(connection.connection())
-        .await
-        .map(|_| ())
-        .map_err(SavepointError::Sql)
+    sqlx::query(AssertSqlSafe(statement)).execute(connection.connection()).await.map(|_| ()).map_err(|error| {
+        holder.mark_aborted();
+        SavepointError::Sql(error)
+    })
 }
 
 enum SavepointError {
@@ -608,6 +710,16 @@ impl TransactionDriver for PgTransactionDriver {
             transaction.holder().ok_or_else(|| TransactionError::Usage("No connection holder for commit".into()))?;
         let connection = holder.lock()?.take();
         match connection {
+            Some(Conn::Transaction(started)) if holder.is_aborted() => {
+                started.rollback().await.map_err(|error| TransactionError::system("Rollback failed", error))?;
+                Err(TransactionError::UnexpectedRollback(
+                    "Transaction rolled back because a statement in it failed. PostgreSQL aborts a transaction \
+                     when a statement fails, and the failure was not returned from the transactional function. \
+                     Return the error, or run the statement that may fail in a nested transaction \
+                     (propagation = Nested)"
+                        .into(),
+                ))
+            }
             Some(Conn::Transaction(started)) => {
                 started.commit().await.map_err(|error| TransactionError::system("Commit failed", error))
             }
@@ -629,11 +741,7 @@ impl TransactionDriver for PgTransactionDriver {
 
     fn set_rollback_only(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
         if let Some(holder) = transaction.holder() {
-            if synchronization::is_beside_nested_transaction() {
-                holder.rollback_only_beside_nested.store(true, Ordering::SeqCst);
-            } else {
-                holder.set_rollback_only();
-            }
+            holder.set_rollback_only();
         }
         Ok(())
     }
@@ -656,6 +764,12 @@ impl TransactionDriver for PgTransactionDriver {
             && let Some(holder) = transaction.holder()
         {
             holder.abandon();
+        }
+    }
+
+    fn abandon_savepoint(&self, transaction: &Self::Transaction, savepoint: &Savepoint) {
+        if let (Some(holder), Ok(name)) = (transaction.holder(), savepoint_name(savepoint)) {
+            holder.savepoint_gone(name);
         }
     }
 
@@ -683,6 +797,7 @@ impl TransactionDriver for PgTransactionDriver {
                 source: Some(error.into()),
             },
         })?;
+        holder.savepoint_created(&name);
         Ok(Arc::new(name))
     }
 
@@ -696,7 +811,7 @@ impl TransactionDriver for PgTransactionDriver {
         execute_on(&holder, format!("ROLLBACK TO SAVEPOINT {name}"))
             .await
             .map_err(|error| error.into_system("Could not roll back to the savepoint"))?;
-        holder.reset_rollback_only();
+        holder.savepoint_rolled_back(name);
         Ok(())
     }
 
@@ -707,7 +822,11 @@ impl TransactionDriver for PgTransactionDriver {
     ) -> Result<(), TransactionError> {
         let holder = transaction.holder_for_savepoint()?;
         let name = savepoint_name(savepoint)?;
-        match execute_on(&holder, format!("RELEASE SAVEPOINT {name}")).await {
+        let released = execute_on(&holder, format!("RELEASE SAVEPOINT {name}")).await;
+        if !matches!(released, Err(SavepointError::State(_))) {
+            holder.savepoint_gone(name);
+        }
+        match released {
             Ok(()) => Ok(()),
             Err(SavepointError::Sql(error)) if release_failure_is_ignorable(&error) => Ok(()),
             Err(error) => Err(error.into_system("Could not release the savepoint")),

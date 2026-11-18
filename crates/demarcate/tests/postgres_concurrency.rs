@@ -239,6 +239,91 @@ impl Service {
         std::future::pending().await
     }
 
+    #[transactional(propagation = Nested)]
+    async fn nested_step(&self, value: &str, work: Duration, fails: bool) -> Result<(), ServiceError> {
+        self.insert(value).await?;
+        tokio::time::sleep(work).await;
+        if fails { Err(ServiceError::Rejected) } else { Ok(()) }
+    }
+
+    #[transactional]
+    async fn outer_with_two_nested(
+        &self,
+        first: (Duration, bool),
+        second_starts_after: Duration,
+        second: (Duration, bool),
+    ) -> Result<(bool, bool), ServiceError> {
+        self.insert("outer").await?;
+        let (first, second) = tokio::join!(self.nested_step("first", first.0, first.1), async {
+            tokio::time::sleep(second_starts_after).await;
+            self.nested_step("second", second.0, second.1).await
+        });
+        Ok((first.is_ok(), second.is_ok()))
+    }
+
+    #[transactional(propagation = Nested)]
+    async fn nested_that_holds_its_status(&self) -> Result<(), ServiceError> {
+        self.insert("held_nested").await?;
+        let status = demarcate::current_transaction_status()?;
+        on_transaction(TransactionPhase::AfterCompletion, false, move || {
+            let status = status.clone();
+            async move {
+                let _ = status.is_completed();
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|_| ServiceError::Rejected)?;
+        std::future::pending().await
+    }
+
+    #[transactional]
+    async fn outer_that_cancels_a_nested_call_holding_its_status(&self) -> Result<bool, ServiceError> {
+        self.insert("outer").await?;
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(30), self.nested_that_holds_its_status()).await.is_err();
+        assert!(cancelled);
+        Ok(self.insert("outer_after").await.is_ok())
+    }
+
+    #[transactional(propagation = Nested)]
+    async fn nested_with_failing_call_beside_inner_nested(&self) -> Result<(), ServiceError> {
+        let (inner, beside) = tokio::join!(self.nested_step("inner", Duration::from_millis(40), false), async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            self.insert_then_fail_in_transaction().await
+        });
+        inner?;
+        beside
+    }
+
+    #[transactional]
+    async fn insert_then_fail_in_transaction(&self) -> Result<(), ServiceError> {
+        Err(ServiceError::Rejected)
+    }
+
+    #[transactional]
+    async fn outer_that_survives_a_failed_nested_call(&self) -> Result<(), ServiceError> {
+        self.insert("outer").await?;
+        assert!(self.nested_with_failing_call_beside_inner_nested().await.is_err());
+        self.insert("outer_after").await
+    }
+
+    #[transactional]
+    async fn ignores_a_failed_statement(&self) -> Result<(), ServiceError> {
+        self.insert("outer").await?;
+        let failed = sqlx::query("select missing_column from demarcate_no_such_table").execute(&self.pool).await;
+        assert!(failed.is_err());
+        Ok(())
+    }
+
+    #[transactional(propagation = Supports)]
+    async fn supports_with_query_then_two_queries(&self) -> Result<(), ServiceError> {
+        self.insert("zero").await?;
+        let (first, second) = tokio::join!(self.insert("first"), self.insert("second"));
+        first?;
+        second
+    }
+
     #[transactional(propagation = Supports)]
     async fn supports_with_two_queries(&self) -> Result<(), ServiceError> {
         let (first, second) = tokio::join!(self.insert("first"), self.insert("second"));
@@ -512,4 +597,50 @@ async fn transactions_hold_when_futures_run_beside_transactional_calls() {
         escaped.is_err() && rows.is_empty(),
         "a call that outlives the transaction it joined must fail, got {escaped:?} and rows {rows:?}"
     );
+
+    let ms = Duration::from_millis;
+    for (first, second_starts_after, second) in [
+        ((ms(80), true), ms(10), (ms(0), false)),
+        ((ms(40), false), ms(10), (ms(80), false)),
+        ((ms(40), true), ms(10), (ms(80), false)),
+        ((ms(40), false), ms(10), (ms(80), true)),
+        ((ms(80), false), ms(10), (ms(0), true)),
+    ] {
+        reset(&service).await;
+        let result = service.outer_with_two_nested(first, second_starts_after, second).await;
+        let rows = service.rows().await;
+        let case = format!("{first:?} then after {second_starts_after:?} {second:?}: {result:?}, rows {rows:?}");
+        match result {
+            Ok((first_ok, second_ok)) => {
+                assert!(
+                    rows.contains(&"outer".to_owned()),
+                    "the outer call returned Ok and nothing was committed: {case}"
+                );
+                assert_eq!(rows.contains(&"first".to_owned()), first_ok, "{case}");
+                assert_eq!(rows.contains(&"second".to_owned()), second_ok, "{case}");
+            }
+            Err(_) => assert!(rows.is_empty(), "{case}"),
+        }
+        assert_eq!(idle_in_transaction(&service).await, 0, "{case}");
+    }
+
+    reset(&service).await;
+    let result = service.outer_that_cancels_a_nested_call_holding_its_status().await;
+    let rows = service.rows().await;
+    assert!(!rows.contains(&"held_nested".to_owned()), "the cancelled nested call was committed: {result:?} {rows:?}");
+    assert!(result.is_err() || rows == ["outer", "outer_after"], "{result:?} {rows:?}");
+    assert_eq!(idle_in_transaction(&service).await, 0);
+
+    reset(&service).await;
+    service.outer_that_survives_a_failed_nested_call().await.unwrap();
+    assert_eq!(service.rows().await, ["outer", "outer_after"]);
+
+    reset(&service).await;
+    let result = service.ignores_a_failed_statement().await;
+    assert!(result.is_err(), "a transaction that a failed statement aborted cannot report a commit");
+    assert!(service.rows().await.is_empty());
+
+    reset(&service).await;
+    service.supports_with_query_then_two_queries().await.unwrap();
+    assert_eq!(service.rows().await, ["first", "second", "zero"]);
 }

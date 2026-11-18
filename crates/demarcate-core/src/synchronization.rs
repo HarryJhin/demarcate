@@ -104,7 +104,6 @@ struct State {
     current_transaction_read_only: bool,
     current_transaction_isolation_level: Option<Isolation>,
     actual_transaction_active: bool,
-    nested_owners: Vec<u64>,
     closed: bool,
 }
 
@@ -162,7 +161,7 @@ impl Context {
         let id = self.next_frame.fetch_add(1, Ordering::SeqCst);
         let mut state = lock(&self.state);
         let mut copy = lock(&state).clone();
-        copy.nested_owners.clear();
+        copy.closed = false;
         let fork = Arc::new(Mutex::new(copy));
         let previous = std::mem::replace(&mut *state, fork);
         lock(&self.frames).push((id, previous));
@@ -234,61 +233,26 @@ impl Drop for Frame {
 
 static NEXT_CONTEXT: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) struct NestedOwner {
-    shared: Shared,
-    owner: u64,
+#[doc(hidden)]
+pub fn context_id() -> Option<u64> {
+    current().map(|context| context.id)
 }
 
-impl Drop for NestedOwner {
-    fn drop(&mut self) {
-        if let Ok(mut state) = self.shared.try_lock()
-            && let Some(position) = state.nested_owners.iter().rposition(|owner| *owner == self.owner)
-        {
-            state.nested_owners.remove(position);
-        }
-    }
-}
-
-pub(crate) fn enter_nested() -> Option<NestedOwner> {
-    let context = current()?;
-    let shared = context.shared();
-    lock(&shared).nested_owners.push(context.id);
-    Some(NestedOwner { shared, owner: context.id })
-}
-
-pub fn is_beside_nested_transaction() -> bool {
-    let Some(context) = current() else { return false };
-    let owner = lock(&context.shared()).nested_owners.last().copied();
-    owner.is_some_and(|owner| !context.is_within(owner))
+#[doc(hidden)]
+pub fn is_within_context(owner: u64) -> bool {
+    current().is_some_and(|context| context.is_within(owner))
 }
 
 const CLOSED: &str = "The transaction that this future joined has completed. A transactional call that joins \
      the transaction of its caller must finish before the caller does; a future that is polled after the caller \
-     returned cannot use that transaction. Await the call inside the caller, or give it its own transaction with \
-     propagation = RequiresNew";
-
-const BESIDE_NESTED: &str = "A nested transaction (savepoint) is running on the connection of this transaction \
-     and this future runs beside it (for example in join! or select!). Until the nested call completes, work on \
-     the connection belongs to its savepoint. Await the nested call first, or run this work inside it";
+     returned cannot use that transaction. Await the call inside the caller, or start it after the caller returned";
 
 #[doc(hidden)]
-pub fn check_open() -> Result<(), TransactionError> {
+pub fn check_access() -> Result<(), TransactionError> {
     match current() {
         Some(context) if lock(&context.shared()).closed => Err(TransactionError::InvalidState(CLOSED.into())),
         _ => Ok(()),
     }
-}
-
-#[doc(hidden)]
-pub fn check_access() -> Result<(), TransactionError> {
-    let Some(context) = current() else { return Ok(()) };
-    if lock(&context.shared()).closed {
-        return Err(TransactionError::InvalidState(CLOSED.into()));
-    }
-    if is_beside_nested_transaction() {
-        return Err(TransactionError::InvalidState(BESIDE_NESTED.into()));
-    }
-    Ok(())
 }
 
 impl<F> Drop for Scoped<F> {

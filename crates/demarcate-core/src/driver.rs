@@ -90,6 +90,8 @@ pub trait TransactionDriver: Send + Sync + 'static {
 
     fn abandon(&self, _transaction: &Self::Transaction) {}
 
+    fn abandon_savepoint(&self, _transaction: &Self::Transaction, _savepoint: &Savepoint) {}
+
     fn is_rollback_only(&self, _transaction: &Self::Transaction) -> bool {
         false
     }
