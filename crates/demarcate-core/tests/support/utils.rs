@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use dtx_core::{
+use demarcate_core::{
     BoundResource, BoxError, BoxFuture, CompletionStatus, Isolation, ResourceHolder, ResourceKey, TransactionDefinition,
     TransactionError, TransactionSynchronization, synchronization,
 };

@@ -143,6 +143,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "demarcate-core"
+version = "0.0.0"
+dependencies = [
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "demarcate-sqlx"
+version = "0.0.0"
+dependencies = [
+ "demarcate-core",
+ "sqlx",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -169,24 +187,6 @@ name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
-
-[[package]]
-name = "dtx-core"
-version = "0.0.0"
-dependencies = [
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dtx-sqlx"
-version = "0.0.0"
-dependencies = [
- "dtx-core",
- "sqlx",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "either"

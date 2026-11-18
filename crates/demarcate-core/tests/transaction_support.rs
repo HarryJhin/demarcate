@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use dtx_core::{
+use demarcate_core::{
     ManagerSettings, PlatformTransactionManager, Propagation, SynchronizationMode, TemplateError, TransactionDefinition,
     TransactionDriver, TransactionError, TransactionExecution, TransactionExecutionListener, TransactionManager,
     TransactionTemplate, synchronization,

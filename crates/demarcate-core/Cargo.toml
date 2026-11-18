@@ -1,5 +1,5 @@
 [package]
-name = "dtx-core"
+name = "demarcate-core"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

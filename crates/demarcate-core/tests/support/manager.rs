@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use dtx_core::{
+use demarcate_core::{
     BoundResource, BoxError, Isolation, ManagerSettings, Savepoint, TransactionDefinition, TransactionDriver,
     TransactionError, TransactionManager, synchronization,
 };

@@ -2,7 +2,7 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use dtx_core::{
+use demarcate_core::{
     BoxFuture, Isolation, ManagerSettings, PlatformTransactionManager, Savepoint, TemplateError, TransactionDefinition,
     TransactionError, TransactionStatus, TransactionTemplate, synchronization,
 };

@@ -2,12 +2,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use dtx_core::{
+use demarcate_core::{
     BoxError, BoxFuture, CompletionStatus, Isolation, ManagerSettings, PlatformTransactionManager, Propagation,
     TemplateError, TransactionDefinition, TransactionError, TransactionSynchronization, TransactionTemplate,
     synchronization as tsm,
 };
-use dtx_sqlx::postgres::{TransactionalPool, manager_with_settings};
+use demarcate_sqlx::postgres::{TransactionalPool, manager_with_settings};
 use sqlx::{AssertSqlSafe, Row};
 
 type AppResult<T> = Result<T, TransactionError>;
@@ -19,12 +19,12 @@ struct Fixture {
 
 impl Fixture {
     async fn new(name: &str) -> Option<Self> {
-        let Ok(url) = std::env::var("DTX_TEST_DATABASE_URL") else {
-            eprintln!("DTX_TEST_DATABASE_URL is not set; skipping {name}");
+        let Ok(url) = std::env::var("DEMARCATE_TEST_DATABASE_URL") else {
+            eprintln!("DEMARCATE_TEST_DATABASE_URL is not set; skipping {name}");
             return None;
         };
         let connections = sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await.unwrap();
-        let table = format!("dtx_{name}");
+        let table = format!("demarcate_{name}");
         sqlx::query(AssertSqlSafe(format!("drop table if exists {table}"))).execute(&connections).await.unwrap();
         sqlx::query(AssertSqlSafe(format!("create table {table}(v text)"))).execute(&connections).await.unwrap();
         Some(Self { pool: TransactionalPool::new(connections), table })
@@ -138,13 +138,13 @@ impl TransactionSynchronization for RecordingSynchronization {
             Ok(())
         })
     }
-    fn savepoint<'a>(&'a self, _savepoint: &'a dtx_core::Savepoint) -> BoxFuture<'a, Result<(), BoxError>> {
+    fn savepoint<'a>(&'a self, _savepoint: &'a demarcate_core::Savepoint) -> BoxFuture<'a, Result<(), BoxError>> {
         Box::pin(async move {
             self.record("savepoint");
             Ok(())
         })
     }
-    fn savepoint_rollback<'a>(&'a self, _savepoint: &'a dtx_core::Savepoint) -> BoxFuture<'a, Result<(), BoxError>> {
+    fn savepoint_rollback<'a>(&'a self, _savepoint: &'a demarcate_core::Savepoint) -> BoxFuture<'a, Result<(), BoxError>> {
         Box::pin(async move {
             self.record("savepoint_rollback");
             Ok(())

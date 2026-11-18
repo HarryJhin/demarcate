@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dtx_core::{
+use demarcate_core::{
     BoundResource, BoxError, BoxFuture, CompletionStatus, Isolation, Propagation, Savepoint, SynchronizationMode,
     TransactionDefinition, TransactionError, TransactionSynchronization, synchronization as tsm,
 };

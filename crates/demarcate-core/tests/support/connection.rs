@@ -2,7 +2,7 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
-use dtx_core::{BoxError, BoxFuture, Isolation, Savepoint};
+use demarcate_core::{BoxError, BoxFuture, Isolation, Savepoint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlErrorKind {

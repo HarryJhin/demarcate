@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dtx_core::{ResourceHolder, Savepoint, TransactionError};
+use demarcate_core::{ResourceHolder, Savepoint, TransactionError};
 
 use super::connection::{ConnectionHandle, SharedConnection, SimpleConnectionHandle, SqlError};
 

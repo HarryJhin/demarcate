@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dtx_core::{
+use demarcate_core::{
     BoundResource, BoxError, BoxFuture, CompletionStatus, Isolation, ManagerSettings, ResourceHolder, ResourceKey,
     Savepoint, TransactionDefinition, TransactionDriver, TransactionError, TransactionManager,
     TransactionSynchronization, synchronization,
@@ -143,7 +143,7 @@ pub struct TransactionalPool {
 impl TransactionalPool {
     pub fn new(pool: PgPool) -> Self {
         let id = NEXT_POOL_ID.fetch_add(1, Ordering::SeqCst);
-        Self { inner: pool, key: ResourceKey::named(format!("dtx-sqlx-postgres-{id}")) }
+        Self { inner: pool, key: ResourceKey::named(format!("demarcate-sqlx-postgres-{id}")) }
     }
 
     pub fn inner(&self) -> &PgPool {
