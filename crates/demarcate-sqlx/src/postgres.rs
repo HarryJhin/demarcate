@@ -48,7 +48,7 @@ pub struct ConnectionHolder {
     synchronized_with_transaction: AtomicBool,
     rollback_only_depth: Mutex<Option<usize>>,
     aborted_depth: Mutex<Option<usize>>,
-    savepoints: Mutex<Vec<(String, u64)>>,
+    savepoints: Mutex<Vec<(String, Option<u64>)>>,
     transaction_active: AtomicBool,
     deadline: Mutex<Option<Instant>>,
     savepoint_counter: AtomicU32,
@@ -84,7 +84,7 @@ impl ConnectionHolder {
     pub fn set_rollback_only(&self) {
         let depth = {
             let savepoints = self.savepoints.lock().expect("savepoints lock");
-            savepoints.iter().take_while(|(_, owner)| synchronization::is_within_context(*owner)).count()
+            savepoints.iter().take_while(|(_, owner)| owner.is_none_or(synchronization::is_within_context)).count()
         };
         let mut marked = self.rollback_only_depth.lock().expect("rollback-only lock");
         *marked = Some(marked.map_or(depth, |existing| existing.min(depth)));
@@ -104,17 +104,30 @@ impl ConnectionHolder {
         self.aborted_depth.lock().expect("aborted lock").is_some()
     }
     fn check_savepoint_owner(&self) -> Result<(), TransactionError> {
-        let owner = self.savepoints.lock().expect("savepoints lock").last().map(|(_, owner)| *owner);
-        match owner {
-            Some(owner) if !synchronization::is_within_context(owner) => {
-                Err(TransactionError::InvalidState(BESIDE_SAVEPOINT.into()))
-            }
-            _ => Ok(()),
-        }
+        let beside = self
+            .savepoints
+            .lock()
+            .expect("savepoints lock")
+            .iter()
+            .any(|(_, owner)| owner.is_some_and(|owner| !synchronization::is_within_context(owner)));
+        if beside { Err(TransactionError::InvalidState(BESIDE_SAVEPOINT.into())) } else { Ok(()) }
     }
     fn savepoint_created(&self, name: &str) {
-        let owner = synchronization::context_id().unwrap_or(u64::MAX);
-        self.savepoints.lock().expect("savepoints lock").push((name.to_owned(), owner));
+        self.savepoints.lock().expect("savepoints lock").push((name.to_owned(), None));
+    }
+    fn savepoint_owned(&self, name: &str) {
+        let owner = synchronization::context_id();
+        if let Some(entry) =
+            self.savepoints.lock().expect("savepoints lock").iter_mut().find(|(existing, _)| existing == name)
+        {
+            entry.1 = owner;
+        }
+    }
+    fn set_rollback_only_for_good(&self) {
+        *self.rollback_only_depth.lock().expect("rollback-only lock") = Some(0);
+    }
+    fn statement_succeeded(&self) {
+        *self.aborted_depth.lock().expect("aborted lock") = None;
     }
     fn savepoint_rolled_back(&self, name: &str) {
         let Some(index) = self.savepoint_index(name) else { return };
@@ -356,7 +369,12 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
             loop {
                 match rows.try_next().await {
                     Ok(Some(step)) => yield step,
-                    Ok(None) => break,
+                    Ok(None) => {
+                        if let Some(holder) = &transaction {
+                            holder.statement_succeeded();
+                        }
+                        break;
+                    }
                     Err(error) => {
                         if let Some(holder) = &transaction
                             && error.as_database_error().is_some()
@@ -382,9 +400,7 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
         Box::pin(async move {
             let mut connection = pool.acquire().await.map_err(into_sqlx)?;
             let result = (&mut *connection).fetch_optional(query).await;
-            if let Err(error) = &result {
-                connection.statement_failed(error);
-            }
+            connection.statement_finished(result.as_ref().err());
             result
         })
     }
@@ -401,9 +417,7 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
         Box::pin(async move {
             let mut connection = pool.acquire().await.map_err(into_sqlx)?;
             let result = (&mut *connection).prepare_with(sql, parameters).await;
-            if let Err(error) = &result {
-                connection.statement_failed(error);
-            }
+            connection.statement_finished(result.as_ref().err());
             result
         })
     }
@@ -419,9 +433,7 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
         Box::pin(async move {
             let mut connection = pool.acquire().await.map_err(into_sqlx)?;
             let result = (&mut *connection).describe(sql).await;
-            if let Err(error) = &result {
-                connection.statement_failed(error);
-            }
+            connection.statement_finished(result.as_ref().err());
             result
         })
     }
@@ -461,11 +473,12 @@ impl TransactionalConnection {
         }
     }
 
-    fn statement_failed(&self, error: &sqlx::Error) {
-        if let Some(holder) = self.transaction_holder()
-            && error.as_database_error().is_some()
-        {
-            holder.mark_aborted();
+    fn statement_finished(&self, error: Option<&sqlx::Error>) {
+        let Some(holder) = self.transaction_holder() else { return };
+        match error {
+            None => holder.statement_succeeded(),
+            Some(error) if error.as_database_error().is_some() => holder.mark_aborted(),
+            Some(_) => {}
         }
     }
 }
@@ -601,13 +614,23 @@ async fn execute_on(holder: &ConnectionHolder, statement: String) -> Result<(), 
     synchronization::check_access().map_err(SavepointError::State)?;
     holder.check_savepoint_owner().map_err(SavepointError::State)?;
     let mut guard = holder.lock().map_err(SavepointError::State)?;
-    let connection = guard
-        .as_mut()
-        .ok_or_else(|| SavepointError::State(TransactionError::Usage("Connection holder has no connection".into())))?;
-    sqlx::query(AssertSqlSafe(statement)).execute(connection.connection()).await.map(|_| ()).map_err(|error| {
-        holder.mark_aborted();
-        SavepointError::Sql(error)
-    })
+    let connection = guard.as_mut().ok_or_else(|| {
+        SavepointError::State(TransactionError::Usage(
+            "The transaction of this status has no open connection. It has completed or its call was \
+                 cancelled, so a savepoint can no longer be used on it"
+                .into(),
+        ))
+    })?;
+    match sqlx::query(AssertSqlSafe(statement)).execute(connection.connection()).await {
+        Ok(_) => {
+            holder.statement_succeeded();
+            Ok(())
+        }
+        Err(error) => {
+            holder.mark_aborted();
+            Err(SavepointError::Sql(error))
+        }
+    }
 }
 
 enum SavepointError {
@@ -767,6 +790,19 @@ impl TransactionDriver for PgTransactionDriver {
         }
     }
 
+    fn own_savepoint(&self, transaction: &Self::Transaction, savepoint: &Savepoint) {
+        if let (Some(holder), Ok(name)) = (transaction.holder(), savepoint_name(savepoint)) {
+            holder.savepoint_owned(name);
+        }
+    }
+
+    fn set_rollback_only_on_abandon(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
+        if let Some(holder) = transaction.holder() {
+            holder.set_rollback_only_for_good();
+        }
+        Ok(())
+    }
+
     fn abandon_savepoint(&self, transaction: &Self::Transaction, savepoint: &Savepoint) {
         if let (Some(holder), Ok(name)) = (transaction.holder(), savepoint_name(savepoint)) {
             holder.savepoint_gone(name);
@@ -823,9 +859,7 @@ impl TransactionDriver for PgTransactionDriver {
         let holder = transaction.holder_for_savepoint()?;
         let name = savepoint_name(savepoint)?;
         let released = execute_on(&holder, format!("RELEASE SAVEPOINT {name}")).await;
-        if !matches!(released, Err(SavepointError::State(_))) {
-            holder.savepoint_gone(name);
-        }
+        holder.savepoint_gone(name);
         match released {
             Ok(()) => Ok(()),
             Err(SavepointError::Sql(error)) if release_failure_is_ignorable(&error) => Ok(()),

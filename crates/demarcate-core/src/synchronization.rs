@@ -170,11 +170,12 @@ impl Context {
 
     fn reattach(&self, id: u64) {
         let discarded = {
-            let mut frames = lock(&self.frames);
+            let Ok(mut frames) = self.frames.try_lock() else { return };
             let Some(position) = frames.iter().position(|(frame, _)| *frame == id) else { return };
+            let Ok(mut state) = self.state.try_lock() else { return };
             let mut later = frames.split_off(position);
             let (_, previous) = later.remove(0);
-            let fork = std::mem::replace(&mut *lock(&self.state), previous);
+            let fork = std::mem::replace(&mut *state, previous);
             (fork, later)
         };
         let leftovers = discarded.0.try_lock().ok().map(|mut state| {

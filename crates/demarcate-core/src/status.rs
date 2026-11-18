@@ -210,7 +210,7 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
             if self.new_transaction {
                 self.driver.abandon(transaction);
             } else if self.rollback_only_when_abandoned
-                && let Err(error) = self.driver.set_rollback_only(transaction)
+                && let Err(error) = self.driver.set_rollback_only_on_abandon(transaction)
             {
                 tracing::debug!(%error, "Could not mark the abandoned participating transaction as rollback-only");
             }
@@ -242,7 +242,9 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
     }
 
     pub(crate) async fn create_and_hold_savepoint(&self) -> Result<(), TransactionError> {
-        let savepoint = self.driver.create_savepoint(self.require_savepoint_transaction()?).await?;
+        let transaction = self.require_savepoint_transaction()?;
+        let savepoint = self.driver.create_savepoint(transaction).await?;
+        self.driver.own_savepoint(transaction, &savepoint);
         synchronization::trigger_savepoint(&savepoint).await?;
         self.set_savepoint(Some(savepoint));
         Ok(())

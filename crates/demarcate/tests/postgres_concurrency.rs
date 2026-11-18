@@ -316,6 +316,54 @@ impl Service {
         Ok(())
     }
 
+    #[transactional]
+    async fn recovers_with_a_savepoint_written_in_sql(&self) -> Result<(), ServiceError> {
+        self.insert("outer").await?;
+        sqlx::query("savepoint written_in_sql").execute(&self.pool).await?;
+        assert!(sqlx::query("select missing_column from demarcate_no_such_table").execute(&self.pool).await.is_err());
+        sqlx::query("rollback to savepoint written_in_sql").execute(&self.pool).await?;
+        self.insert("outer_after").await
+    }
+
+    #[transactional]
+    async fn leaves_a_savepoint_open(&self) -> Result<(), ServiceError> {
+        demarcate::current_transaction_status()?.create_savepoint().await?;
+        self.insert("inner").await
+    }
+
+    #[transactional]
+    async fn outer_after_a_call_that_left_a_savepoint_open(&self) -> Result<(), ServiceError> {
+        self.insert("outer").await?;
+        self.leaves_a_savepoint_open().await?;
+        self.insert("outer_after").await?;
+        self.nested_step("nested", Duration::ZERO, false).await
+    }
+
+    #[transactional(propagation = Nested)]
+    async fn nested_that_drops_a_call_of_its_caller(&self, call: Call<'_>) -> Result<(), ServiceError> {
+        drop(call);
+        Err(ServiceError::Rejected)
+    }
+
+    #[transactional]
+    async fn outer_whose_call_is_dropped_inside_a_nested_call(&self) -> Result<(), ServiceError> {
+        self.insert("outer").await?;
+        let mut call: Call<'_> = Box::pin(self.insert_then_wait("dropped"));
+        tokio::select! {
+            biased;
+            _ = &mut call => panic!("the call must still be running"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        assert!(self.nested_that_drops_a_call_of_its_caller(call).await.is_err());
+        Ok(())
+    }
+
+    #[transactional]
+    async fn insert_then_wait(&self, value: &str) -> Result<(), ServiceError> {
+        self.insert(value).await?;
+        std::future::pending().await
+    }
+
     #[transactional(propagation = Supports)]
     async fn supports_with_query_then_two_queries(&self) -> Result<(), ServiceError> {
         self.insert("zero").await?;
@@ -643,4 +691,18 @@ async fn transactions_hold_when_futures_run_beside_transactional_calls() {
     reset(&service).await;
     service.supports_with_query_then_two_queries().await.unwrap();
     assert_eq!(service.rows().await, ["first", "second", "zero"]);
+
+    reset(&service).await;
+    service.recovers_with_a_savepoint_written_in_sql().await.unwrap();
+    assert_eq!(service.rows().await, ["outer", "outer_after"]);
+
+    reset(&service).await;
+    service.outer_after_a_call_that_left_a_savepoint_open().await.unwrap();
+    assert_eq!(service.rows().await, ["inner", "nested", "outer", "outer_after"]);
+
+    reset(&service).await;
+    let result = service.outer_whose_call_is_dropped_inside_a_nested_call().await;
+    let rows = service.rows().await;
+    assert!(!rows.contains(&"dropped".to_owned()), "the dropped call was committed: {result:?} {rows:?}");
+    assert_eq!(idle_in_transaction(&service).await, 0);
 }
