@@ -100,7 +100,13 @@ impl ConnectionHolder {
         self.reference_count.fetch_add(1, Ordering::SeqCst);
     }
     pub fn released(&self) {
-        let _ = self.reference_count.try_update(Ordering::SeqCst, Ordering::SeqCst, |count| count.checked_sub(1));
+        let mut current = self.reference_count.load(Ordering::SeqCst);
+        while current > 0 {
+            match self.reference_count.compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
     pub fn is_open(&self) -> bool {
         self.reference_count.load(Ordering::SeqCst) > 0
@@ -456,9 +462,7 @@ impl PgTransactionObject {
             ));
         }
         self.holder().ok_or_else(|| {
-            TransactionError::Usage(
-                "Cannot create nested transaction when not exposing a JDBC transaction".into(),
-            )
+            TransactionError::Usage("Cannot create nested transaction when not exposing a JDBC transaction".into())
         })
     }
 }
@@ -487,7 +491,11 @@ async fn execute_on(holder: &ConnectionHolder, statement: String) -> Result<(), 
     let connection = guard
         .as_mut()
         .ok_or_else(|| SavepointError::State(TransactionError::Usage("Connection holder has no connection".into())))?;
-    sqlx::query(AssertSqlSafe(statement)).execute(connection.connection()).await.map(|_| ()).map_err(SavepointError::Sql)
+    sqlx::query(AssertSqlSafe(statement))
+        .execute(connection.connection())
+        .await
+        .map(|_| ())
+        .map_err(SavepointError::Sql)
 }
 
 enum SavepointError {
@@ -535,20 +543,22 @@ impl TransactionDriver for PgTransactionDriver {
     ) -> Result<(), TransactionError> {
         let existing = transaction.holder();
         if let Some(holder) = &existing
-            && !holder.is_synchronized_with_transaction() {
-                return Err(TransactionError::CannotCreateTransaction {
-                    message: "Could not open connection for transaction: a connection holder without \
+            && !holder.is_synchronized_with_transaction()
+        {
+            return Err(TransactionError::CannotCreateTransaction {
+                message: "Could not open connection for transaction: a connection holder without \
                               transaction synchronization is already bound"
-                        .into(),
-                    source: None,
-                });
-            }
-        let started = self.pool.inner.begin_with(AssertSqlSafe(begin_statement(definition))).await.map_err(
-            |error| TransactionError::CannotCreateTransaction {
-                message: "Could not open JDBC Connection for transaction".into(),
-                source: Some(error.into()),
-            },
-        )?;
+                    .into(),
+                source: None,
+            });
+        }
+        let started =
+            self.pool.inner.begin_with(AssertSqlSafe(begin_statement(definition))).await.map_err(|error| {
+                TransactionError::CannotCreateTransaction {
+                    message: "Could not open JDBC Connection for transaction".into(),
+                    source: Some(error.into()),
+                }
+            })?;
         let holder = Arc::new(ConnectionHolder::new(Conn::Transaction(started)));
         holder.set_synchronized_with_transaction(true);
         holder.set_transaction_active(true);
@@ -556,7 +566,8 @@ impl TransactionDriver for PgTransactionDriver {
             holder.set_timeout(timeout);
         }
         transaction.set_holder(Some(holder.clone()), true);
-        if let Err(error) = synchronization::bind_resource(self.pool.key.clone(), BoundResource::holder(holder.clone())) {
+        if let Err(error) = synchronization::bind_resource(self.pool.key.clone(), BoundResource::holder(holder.clone()))
+        {
             holder.release_connection().await;
             transaction.set_holder(None, false);
             return Err(TransactionError::CannotCreateTransaction {
@@ -583,9 +594,8 @@ impl TransactionDriver for PgTransactionDriver {
     }
 
     async fn commit(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
-        let holder = transaction
-            .holder()
-            .ok_or_else(|| TransactionError::Usage("No connection holder for commit".into()))?;
+        let holder =
+            transaction.holder().ok_or_else(|| TransactionError::Usage("No connection holder for commit".into()))?;
         let connection = holder.lock()?.take();
         match connection {
             Some(Conn::Transaction(started)) => {
@@ -596,9 +606,8 @@ impl TransactionDriver for PgTransactionDriver {
     }
 
     async fn rollback(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
-        let holder = transaction
-            .holder()
-            .ok_or_else(|| TransactionError::Usage("No connection holder for rollback".into()))?;
+        let holder =
+            transaction.holder().ok_or_else(|| TransactionError::Usage("No connection holder for rollback".into()))?;
         let connection = holder.lock()?.take();
         match connection {
             Some(Conn::Transaction(started)) => {

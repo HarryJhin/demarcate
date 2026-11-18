@@ -358,10 +358,7 @@ async fn participating_transaction_with_transaction_started_from_synch() {
         execute(tt, |_status| async move { tsm::register_synchronization(synch.clone()) }).await.unwrap();
         assert!(!has_resource(ds));
         assert_eq!(synch.flags(), [true, true, true, true]);
-        assert!(matches!(
-            *synch.after_completion_exception.lock().unwrap(),
-            Some(TransactionError::InvalidState(_))
-        ));
+        assert!(matches!(*synch.after_completion_exception.lock().unwrap(), Some(TransactionError::InvalidState(_))));
         con.log.verify_times("commit", 2);
         con.log.verify_times("close", 2);
     })
@@ -713,10 +710,7 @@ async fn propagation_supports_and_requires_new_with_early_access() {
 }
 
 async fn assert_transaction_read_only(tm: &Tm, ds: &Arc<dyn DataSource>, isolation: Isolation) {
-    let tt = template(
-        tm,
-        def(Propagation::RequiresNew).isolation(isolation).read_only(true).name("my-transaction"),
-    );
+    let tt = template(tm, def(Propagation::RequiresNew).isolation(isolation).read_only(true).name("my-transaction"));
     assert!(!has_resource(ds));
     execute(&tt, |status| async move {
         assert_eq!(status.transaction_name(), "my-transaction");
@@ -774,7 +768,14 @@ async fn transaction_with_default_read_only() {
         });
         let ds = &MockDataSource::returning(&[&con]);
         assert_transaction_read_only(&manager(ds), ds, Isolation::Default).await;
-        con.log.verify_exactly(&["isReadOnly", "getAutoCommit", "setAutoCommit(false)", "commit", "setAutoCommit(true)", "close"]);
+        con.log.verify_exactly(&[
+            "isReadOnly",
+            "getAutoCommit",
+            "setAutoCommit(false)",
+            "commit",
+            "setAutoCommit(true)",
+            "close",
+        ]);
     })
     .await;
 }

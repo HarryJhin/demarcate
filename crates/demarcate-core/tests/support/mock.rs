@@ -2,12 +2,12 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use super::{
+    Connection, DataSource, DataSourceTransactionDriver, SharedConnection, SqlError, Statement, data_source_key,
+};
 use demarcate_core::{
     BoxFuture, Isolation, ManagerSettings, PlatformTransactionManager, Savepoint, TemplateError, TransactionDefinition,
     TransactionError, TransactionStatus, TransactionTemplate, synchronization,
-};
-use super::{
-    Connection, DataSource, DataSourceTransactionDriver, SharedConnection, SqlError, Statement, data_source_key,
 };
 
 type SqlResult<T> = Result<T, SqlError>;
@@ -146,9 +146,9 @@ impl Connection for MockConnection {
         })
     }
     fn set_transaction_isolation(&mut self, isolation: Isolation) -> BoxFuture<'_, SqlResult<()>> {
-        Box::pin(async move {
-            self.call("setTransactionIsolation", format!("setTransactionIsolation({isolation:?})"), ())
-        })
+        Box::pin(
+            async move { self.call("setTransactionIsolation", format!("setTransactionIsolation({isolation:?})"), ()) },
+        )
     }
     fn supports_savepoints(&mut self) -> BoxFuture<'_, SqlResult<bool>> {
         Box::pin(async move { Ok(self.settings.lock().unwrap().supports_savepoints) })

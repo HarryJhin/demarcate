@@ -126,10 +126,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
         }
     }
 
-    pub async fn status(
-        &self,
-        definition: Option<&TransactionDefinition>,
-    ) -> Result<Status<D>, TransactionError> {
+    pub async fn status(&self, definition: Option<&TransactionDefinition>) -> Result<Status<D>, TransactionError> {
         let defaults = TransactionDefinition::default();
         let def = definition.unwrap_or(&defaults);
         synchronization::check_boundary_entry()?;
@@ -217,7 +214,10 @@ impl<D: TransactionDriver> TransactionManager<D> {
                     self.notify(|listener| listener.after_begin(status.as_ref(), None));
                     return Ok(status);
                 }
-                return self.start_transaction(definition, transaction, true, None).await.map_err(|(error, _, _)| error);
+                return self
+                    .start_transaction(definition, transaction, true, None)
+                    .await
+                    .map_err(|(error, _, _)| error);
             }
             _ => {}
         }
@@ -255,7 +255,8 @@ impl<D: TransactionDriver> TransactionManager<D> {
         let status =
             self.new_transaction_status(definition, Some(transaction), true, new_synchronization, nested, suspended);
         self.notify(|listener| listener.before_begin(status.as_ref()));
-        let begun = self.driver.begin(status.transaction().expect("transaction present"), definition, &self.settings).await;
+        let begun =
+            self.driver.begin(status.transaction().expect("transaction present"), definition, &self.settings).await;
         if let Err(error) = begun {
             self.notify(|listener| listener.after_begin(status.as_ref(), Some(&error)));
             let suspended = status.take_suspended_resources();
@@ -279,8 +280,14 @@ impl<D: TransactionDriver> TransactionManager<D> {
         new_synchronization: bool,
         suspended: Option<SuspendedResourcesHolder<D>>,
     ) -> Result<Status<D>, TransactionError> {
-        let status =
-            self.new_transaction_status(definition, transaction, new_transaction, new_synchronization, false, suspended);
+        let status = self.new_transaction_status(
+            definition,
+            transaction,
+            new_transaction,
+            new_synchronization,
+            false,
+            suspended,
+        );
         self.prepare_synchronization(&status, definition)?;
         Ok(status)
     }
@@ -413,9 +420,14 @@ impl<D: TransactionDriver> TransactionManager<D> {
         Ok(())
     }
 
-    fn downcast<'a>(&self, status: &'a dyn TransactionStatus) -> Result<&'a ManagedTransactionStatus<D>, TransactionError> {
+    fn downcast<'a>(
+        &self,
+        status: &'a dyn TransactionStatus,
+    ) -> Result<&'a ManagedTransactionStatus<D>, TransactionError> {
         status.as_any().downcast_ref::<ManagedTransactionStatus<D>>().ok_or_else(|| {
-            TransactionError::InvalidTransactionState("Transaction status was not created by this transaction manager".into())
+            TransactionError::InvalidTransactionState(
+                "Transaction status was not created by this transaction manager".into(),
+            )
         })
     }
 
@@ -601,9 +613,10 @@ impl<D: TransactionDriver> TransactionManager<D> {
             if status.is_new_transaction() {
                 self.driver.rollback(status.transaction().expect("transaction present")).await?;
             } else if let Some(transaction) = status.transaction()
-                && self.settings.global_rollback_on_participation_failure {
-                    self.driver.set_rollback_only(transaction)?;
-                }
+                && self.settings.global_rollback_on_participation_failure
+            {
+                self.driver.set_rollback_only(transaction)?;
+            }
             Ok(())
         }
         .await;

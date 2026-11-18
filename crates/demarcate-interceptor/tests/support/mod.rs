@@ -30,13 +30,19 @@ impl TransactionExecution for SimpleTransactionStatus {
 
 impl SavepointManager for SimpleTransactionStatus {
     fn create_savepoint(&self) -> BoxFuture<'_, Result<Savepoint, TransactionError>> {
-        Box::pin(async { Err(TransactionError::NestedNotSupported("This transaction does not support savepoints".into())) })
+        Box::pin(async {
+            Err(TransactionError::NestedNotSupported("This transaction does not support savepoints".into()))
+        })
     }
     fn rollback_to_savepoint<'a>(&'a self, _savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>> {
-        Box::pin(async { Err(TransactionError::NestedNotSupported("This transaction does not support savepoints".into())) })
+        Box::pin(async {
+            Err(TransactionError::NestedNotSupported("This transaction does not support savepoints".into()))
+        })
     }
     fn release_savepoint<'a>(&'a self, _savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>> {
-        Box::pin(async { Err(TransactionError::NestedNotSupported("This transaction does not support savepoints".into())) })
+        Box::pin(async {
+            Err(TransactionError::NestedNotSupported("This transaction does not support savepoints".into()))
+        })
     }
 }
 
@@ -77,7 +83,10 @@ impl PlatformTransactionManager for CallCountingTransactionManager {
     ) -> BoxFuture<'a, Result<Arc<dyn TransactionStatus>, TransactionError>> {
         Box::pin(async move {
             if self.fail_begin.load(Ordering::SeqCst) {
-                return Err(TransactionError::CannotCreateTransaction { message: "Cannot create".into(), source: None });
+                return Err(TransactionError::CannotCreateTransaction {
+                    message: "Cannot create".into(),
+                    source: None,
+                });
             }
             self.begun.fetch_add(1, Ordering::SeqCst);
             *self.last_definition.lock().unwrap() = definition.cloned();
@@ -90,7 +99,11 @@ impl PlatformTransactionManager for CallCountingTransactionManager {
         Box::pin(async move {
             self.commits.fetch_add(1, Ordering::SeqCst);
             if self.fail_commit_with_system_exception.load(Ordering::SeqCst) {
-                return Err(TransactionError::System { message: "system exception".into(), source: None, application: None });
+                return Err(TransactionError::System {
+                    message: "system exception".into(),
+                    source: None,
+                    application: None,
+                });
             }
             if self.fail_commit.load(Ordering::SeqCst) {
                 return Err(TransactionError::UnexpectedRollback("Cannot commit".into()));
@@ -103,7 +116,11 @@ impl PlatformTransactionManager for CallCountingTransactionManager {
         Box::pin(async move {
             self.rollbacks.fetch_add(1, Ordering::SeqCst);
             if self.fail_rollback.load(Ordering::SeqCst) {
-                return Err(TransactionError::System { message: "system exception".into(), source: None, application: None });
+                return Err(TransactionError::System {
+                    message: "system exception".into(),
+                    source: None,
+                    application: None,
+                });
             }
             Ok(())
         })

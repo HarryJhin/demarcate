@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use demarcate_core::{
-    BoundResource, BoxError, BoxFuture, CompletionStatus, Isolation, ResourceHolder, ResourceKey, TransactionDefinition,
-    TransactionError, TransactionSynchronization, synchronization,
+    BoundResource, BoxError, BoxFuture, CompletionStatus, Isolation, ResourceHolder, ResourceKey,
+    TransactionDefinition, TransactionError, TransactionSynchronization, synchronization,
 };
 
 use super::connection::{DataSource, SharedConnection, SqlError, SqlErrorKind, Statement};
@@ -16,11 +16,15 @@ pub fn data_source_key(data_source: &Arc<dyn DataSource>) -> ResourceKey {
 }
 
 pub fn bound_holder(data_source: &Arc<dyn DataSource>) -> Option<Arc<ConnectionHolder>> {
-    synchronization::resource(&data_source_key(data_source)).and_then(|resource| resource.downcast::<ConnectionHolder>())
+    synchronization::resource(&data_source_key(data_source))
+        .and_then(|resource| resource.downcast::<ConnectionHolder>())
 }
 
 fn cannot_get_connection(source: impl Into<BoxError>) -> TransactionError {
-    TransactionError::CannotGetConnection { message: "Failed to obtain JDBC Connection".into(), source: Some(source.into()) }
+    TransactionError::CannotGetConnection {
+        message: "Failed to obtain JDBC Connection".into(),
+        source: Some(source.into()),
+    }
 }
 
 pub async fn connection(data_source: &Arc<dyn DataSource>) -> Result<SharedConnection, TransactionError> {
@@ -122,9 +126,7 @@ pub async fn reset_connection_after_transaction(
 }
 
 pub fn is_connection_transactional(connection: &SharedConnection, data_source: Option<&Arc<dyn DataSource>>) -> bool {
-    data_source
-        .and_then(bound_holder)
-        .is_some_and(|holder| connection_equals(&holder, connection))
+    data_source.and_then(bound_holder).is_some_and(|holder| connection_equals(&holder, connection))
 }
 
 pub async fn apply_transaction_timeout(
@@ -146,10 +148,7 @@ pub async fn apply_timeout(
         _ => None,
     };
     if let Some(seconds) = seconds {
-        statement
-            .set_query_timeout(seconds)
-            .await
-            .map_err(|error| TransactionError::Other(error.into()))?;
+        statement.set_query_timeout(seconds).await.map_err(|error| TransactionError::Other(error.into()))?;
     }
     Ok(())
 }
@@ -203,7 +202,12 @@ struct ConnectionSynchronization {
 
 impl ConnectionSynchronization {
     fn new(connection_holder: Arc<ConnectionHolder>, data_source: Arc<dyn DataSource>) -> Self {
-        Self { connection_holder, data_source, order: CONNECTION_SYNCHRONIZATION_ORDER, holder_active: AtomicBool::new(true) }
+        Self {
+            connection_holder,
+            data_source,
+            order: CONNECTION_SYNCHRONIZATION_ORDER,
+            holder_active: AtomicBool::new(true),
+        }
     }
     fn key(&self) -> ResourceKey {
         data_source_key(&self.data_source)

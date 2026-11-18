@@ -332,9 +332,7 @@ pub fn init_synchronization() -> Result<(), TransactionError> {
     })
 }
 
-pub fn register_synchronization(
-    synchronization: Arc<dyn TransactionSynchronization>,
-) -> Result<(), TransactionError> {
+pub fn register_synchronization(synchronization: Arc<dyn TransactionSynchronization>) -> Result<(), TransactionError> {
     write(|state| {
         let synchronizations = state
             .synchronizations

@@ -37,7 +37,11 @@ impl Fixture {
         self.template_on(self.manager(|_| {}), propagation)
     }
 
-    fn template_on(&self, manager: Arc<dyn PlatformTransactionManager>, propagation: Propagation) -> TransactionTemplate {
+    fn template_on(
+        &self,
+        manager: Arc<dyn PlatformTransactionManager>,
+        propagation: Propagation,
+    ) -> TransactionTemplate {
         TransactionTemplate::with_definition(manager, TransactionDefinition::with_propagation(propagation))
     }
 
@@ -141,7 +145,10 @@ impl TransactionSynchronization for RecordingSynchronization {
             Ok(())
         })
     }
-    fn savepoint_rollback<'a>(&'a self, _savepoint: &'a demarcate_core::Savepoint) -> BoxFuture<'a, Result<(), BoxError>> {
+    fn savepoint_rollback<'a>(
+        &'a self,
+        _savepoint: &'a demarcate_core::Savepoint,
+    ) -> BoxFuture<'a, Result<(), BoxError>> {
         Box::pin(async move {
             self.record("savepoint_rollback");
             Ok(())
@@ -239,10 +246,7 @@ async fn assert_participating_transaction_with_rollback_only(name: &str, fail_ea
             .await;
 
         if fail_early {
-            assert!(matches!(
-                participation,
-                Err(TemplateError::Transaction(TransactionError::UnexpectedRollback(_)))
-            ));
+            assert!(matches!(participation, Err(TemplateError::Transaction(TransactionError::UnexpectedRollback(_)))));
             manager.rollback(outer.as_ref()).await.unwrap();
         } else {
             participation.unwrap();
@@ -307,7 +311,11 @@ async fn participating_transaction_with_incompatible_read_only() {
         outer.definition_mut().read_only = true;
         let result = outer
             .execute(|_outer| async move {
-                match f.template_on(manager.clone(), Propagation::Required).execute(|_| async move { Ok::<_, TransactionError>(()) }).await {
+                match f
+                    .template_on(manager.clone(), Propagation::Required)
+                    .execute(|_| async move { Ok::<_, TransactionError>(()) })
+                    .await
+                {
                     Err(TemplateError::Transaction(error)) => Err::<(), _>(error),
                     other => panic!("unexpected result: {other:?}"),
                 }

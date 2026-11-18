@@ -46,7 +46,8 @@ async fn two_transactions_should_succeed() {
 async fn enclosing_transaction_with_nested_transaction_on_advised_inside() {
     let tm = CallCountingTransactionManager::new();
     let outer = TransactionAttribute::with_definition(TransactionDefinition::with_propagation(Propagation::Required));
-    let inner = TransactionAttribute::with_definition(TransactionDefinition::with_propagation(Propagation::RequiresNew));
+    let inner =
+        TransactionAttribute::with_definition(TransactionDefinition::with_propagation(Propagation::RequiresNew));
     let inner_manager = tm.clone();
     invoke_with_manager(tm.clone(), outer, "test::exceptional", async move {
         let info = current_transaction_info().unwrap();
@@ -202,7 +203,10 @@ async fn panic_publishes_method_rollback_event() {
 #[test]
 fn determine_transaction_manager_with_qualifier_unknown() {
     let registry = TransactionManagerRegistry::new();
-    let error = registry.determine_transaction_manager(&TransactionAttribute::new().qualifier("fooTransactionManager")).err().unwrap();
+    let error = registry
+        .determine_transaction_manager(&TransactionAttribute::new().qualifier("fooTransactionManager"))
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("fooTransactionManager"));
 }
 
@@ -213,7 +217,9 @@ fn determine_transaction_manager_with_qualifier_and_default() {
     let foo = CallCountingTransactionManager::new();
     registry.set_default(default.clone());
     registry.register("fooTransactionManager", foo.clone());
-    let chosen = registry.determine_transaction_manager(&TransactionAttribute::new().qualifier("fooTransactionManager")).unwrap();
+    let chosen = registry
+        .determine_transaction_manager(&TransactionAttribute::new().qualifier("fooTransactionManager"))
+        .unwrap();
     assert!(std::ptr::addr_eq(Arc::as_ptr(&chosen), Arc::as_ptr(&foo)));
     let chosen = registry.determine_transaction_manager(&TransactionAttribute::new()).unwrap();
     assert!(std::ptr::addr_eq(Arc::as_ptr(&chosen), Arc::as_ptr(&default)));

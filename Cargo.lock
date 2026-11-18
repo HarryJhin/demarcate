@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "demarcate",
  "demarcate-core",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "tokio",
  "tracing",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-interceptor"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "demarcate-core",
  "tokio",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-macros"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-sqlx"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-stream",
  "demarcate-core",

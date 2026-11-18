@@ -2,7 +2,13 @@
 name = "demarcate"
 version.workspace = true
 edition.workspace = true
-publish.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "Declarative transactions for Rust, ported from Spring: #[transactional], propagation, rollback rules and transaction synchronization"
+keywords = ["transaction", "database", "spring", "async", "sqlx"]
+categories = ["database", "asynchronous"]
 
 [features]
 default = []
@@ -10,10 +16,10 @@ sqlx-postgres = ["dep:demarcate-sqlx", "demarcate-sqlx/postgres"]
 sqlx-macros = ["demarcate-sqlx?/macros"]
 
 [dependencies]
-demarcate-core = { path = "../demarcate-core" }
-demarcate-interceptor = { path = "../demarcate-interceptor" }
-demarcate-macros = { path = "../demarcate-macros" }
-demarcate-sqlx = { path = "../demarcate-sqlx", optional = true, default-features = false }
+demarcate-core = { path = "../demarcate-core", version = "0.1.0" }
+demarcate-interceptor = { path = "../demarcate-interceptor", version = "0.1.0" }
+demarcate-macros = { path = "../demarcate-macros", version = "0.1.0" }
+demarcate-sqlx = { path = "../demarcate-sqlx", version = "0.1.0", optional = true, default-features = false }
 
 [dev-dependencies]
 demarcate = { path = ".", features = ["sqlx-postgres"] }

@@ -2,7 +2,13 @@
 name = "demarcate-macros"
 version.workspace = true
 edition.workspace = true
-publish.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "The #[transactional] attribute macro of demarcate"
+keywords = ["transaction", "database", "spring", "async", "sqlx"]
+categories = ["database", "development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true

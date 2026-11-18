@@ -55,9 +55,7 @@ impl std::error::Error for TransactionError {
         match self {
             Self::CannotCreateTransaction { source, .. }
             | Self::CannotGetConnection { source, .. }
-            | Self::System { source, .. } => {
-                source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
-            }
+            | Self::System { source, .. } => source.as_deref().map(|e| e as &(dyn std::error::Error + 'static)),
             Self::Other(source) => Some(source.as_ref()),
             _ => None,
         }

@@ -2,7 +2,13 @@
 name = "demarcate-core"
 version.workspace = true
 edition.workspace = true
-publish.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "Transaction abstraction for declarative transactions: propagation, synchronization and the transaction manager core"
+keywords = ["transaction", "database", "spring", "async", "sqlx"]
+categories = ["database", "asynchronous"]
 
 [dependencies]
 tokio = { workspace = true }

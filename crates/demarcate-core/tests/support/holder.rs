@@ -141,15 +141,12 @@ impl ConnectionHolder {
     }
 
     pub fn time_to_live_in_millis(&self) -> Result<i64, TransactionError> {
-        let deadline = self.deadline().ok_or_else(|| {
-            TransactionError::InvalidState("No timeout specified for this resource holder".into())
-        })?;
+        let deadline = self
+            .deadline()
+            .ok_or_else(|| TransactionError::InvalidState("No timeout specified for this resource holder".into()))?;
         let now = Instant::now();
-        let time_to_live = if deadline > now {
-            (deadline - now).as_millis() as i64
-        } else {
-            -((now - deadline).as_millis() as i64)
-        };
+        let time_to_live =
+            if deadline > now { (deadline - now).as_millis() as i64 } else { -((now - deadline).as_millis() as i64) };
         self.check_transaction_timeout(time_to_live <= 0)?;
         Ok(time_to_live)
     }

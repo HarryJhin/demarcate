@@ -196,7 +196,11 @@ async fn declarative_transactions_on_postgres() {
 
     reset(service).await;
     service.repository.insert("auto-commit").await.unwrap();
-    assert_eq!(service.repository.rows().await, ["auto-commit"], "acquire() without a transaction commits each statement");
+    assert_eq!(
+        service.repository.rows().await,
+        ["auto-commit"],
+        "acquire() without a transaction commits each statement"
+    );
 
     reset(service).await;
     let spawned = service.clone();

@@ -63,8 +63,7 @@ pub trait TransactionDriver: Send + Sync + 'static {
 
     fn commit(&self, transaction: &Self::Transaction) -> impl Future<Output = Result<(), TransactionError>> + Send;
 
-    fn rollback(&self, transaction: &Self::Transaction)
-    -> impl Future<Output = Result<(), TransactionError>> + Send;
+    fn rollback(&self, transaction: &Self::Transaction) -> impl Future<Output = Result<(), TransactionError>> + Send;
 
     fn set_rollback_only(&self, _transaction: &Self::Transaction) -> Result<(), TransactionError> {
         Err(TransactionError::InvalidTransactionState(
@@ -80,8 +79,7 @@ pub trait TransactionDriver: Send + Sync + 'static {
         synchronizations: Vec<Arc<dyn TransactionSynchronization>>,
     ) -> impl Future<Output = Result<(), TransactionError>> + Send {
         async move {
-            synchronization::invoke_after_completion(&synchronizations, CompletionStatus::Unknown)
-                .await;
+            synchronization::invoke_after_completion(&synchronizations, CompletionStatus::Unknown).await;
             Ok(())
         }
     }
@@ -106,11 +104,7 @@ pub trait TransactionDriver: Send + Sync + 'static {
         &self,
         _transaction: &Self::Transaction,
     ) -> impl Future<Output = Result<Savepoint, TransactionError>> + Send {
-        async {
-            Err(TransactionError::NestedNotSupported(
-                "Transaction object does not support savepoints".into(),
-            ))
-        }
+        async { Err(TransactionError::NestedNotSupported("Transaction object does not support savepoints".into())) }
     }
 
     fn rollback_to_savepoint(
@@ -118,11 +112,7 @@ pub trait TransactionDriver: Send + Sync + 'static {
         _transaction: &Self::Transaction,
         _savepoint: &Savepoint,
     ) -> impl Future<Output = Result<(), TransactionError>> + Send {
-        async {
-            Err(TransactionError::NestedNotSupported(
-                "Transaction object does not support savepoints".into(),
-            ))
-        }
+        async { Err(TransactionError::NestedNotSupported("Transaction object does not support savepoints".into())) }
     }
 
     fn release_savepoint(
@@ -130,10 +120,6 @@ pub trait TransactionDriver: Send + Sync + 'static {
         _transaction: &Self::Transaction,
         _savepoint: &Savepoint,
     ) -> impl Future<Output = Result<(), TransactionError>> + Send {
-        async {
-            Err(TransactionError::NestedNotSupported(
-                "Transaction object does not support savepoints".into(),
-            ))
-        }
+        async { Err(TransactionError::NestedNotSupported("Transaction object does not support savepoints".into())) }
     }
 }

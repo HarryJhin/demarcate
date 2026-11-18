@@ -2,7 +2,13 @@
 name = "demarcate-sqlx"
 version.workspace = true
 edition.workspace = true
-publish.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "sqlx transaction manager for demarcate: PostgreSQL driver and a transaction-aware pool"
+keywords = ["transaction", "database", "spring", "async", "sqlx"]
+categories = ["database", "asynchronous"]
 
 [features]
 default = ["postgres"]
@@ -10,7 +16,7 @@ postgres = ["sqlx/postgres"]
 macros = ["sqlx/macros"]
 
 [dependencies]
-demarcate-core = { path = "../demarcate-core" }
+demarcate-core = { path = "../demarcate-core", version = "0.1.0" }
 async-stream = "0.3"
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }

@@ -88,8 +88,7 @@ where
     E: From<TransactionError> + 'static,
     Fut: Future<Output = Result<T, E>>,
 {
-    let joinpoint_identification =
-        attribute.descriptor.clone().unwrap_or_else(|| method_identification.to_owned());
+    let joinpoint_identification = attribute.descriptor.clone().unwrap_or_else(|| method_identification.to_owned());
     if attribute.definition.name.is_none() {
         attribute.definition.name = Some(joinpoint_identification.clone());
     }
@@ -115,11 +114,8 @@ where
             resume_unwind(panic)
         }
         Ok(Err(application)) => {
-            let rollback = info.attribute.rollback_on_type(
-                Some(&application as &dyn Any),
-                TypeId::of::<E>(),
-                type_name::<E>(),
-            );
+            let rollback =
+                info.attribute.rollback_on_type(Some(&application as &dyn Any), TypeId::of::<E>(), type_name::<E>());
             let completed = if rollback {
                 registry().publish_rollback(&MethodRollbackEvent {
                     method: info.joinpoint_identification.clone(),
