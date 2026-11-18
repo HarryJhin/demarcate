@@ -118,8 +118,24 @@ impl ConnectionHolder {
     async fn release_connection(&self) {
         self.connection.lock().await.take();
     }
-    async fn lock(&self) -> OwnedMutexGuard<Option<Conn>> {
-        self.connection.clone().lock_owned().await
+    fn lock(&self) -> Result<OwnedMutexGuard<Option<Conn>>, TransactionError> {
+        self.connection.clone().try_lock_owned().map_err(|_| {
+            TransactionError::InvalidState(
+                "The connection of the current transaction is already in use on this task. A \
+                 TransactionalConnection returned by acquire() is still alive, or two queries of one transaction \
+                 are awaited concurrently (join!, select!). Drop the connection before calling another \
+                 transactional function, and await the queries of one transaction one after another"
+                    .into(),
+            )
+        })
+    }
+
+    fn abandon(&self) {
+        self.set_transaction_active(false);
+        self.clear();
+        if let Ok(mut connection) = self.connection.try_lock() {
+            connection.take();
+        }
     }
 }
 
@@ -177,21 +193,12 @@ impl TransactionalPool {
 
     pub async fn acquire(&self) -> Result<TransactionalConnection, TransactionError> {
         if let Some(holder) = self.bound_holder() {
-            holder.requested();
-            let mut guard = holder.lock().await;
+            let mut guard = holder.lock()?;
             if guard.is_none() {
-                match self.inner.acquire().await {
-                    Ok(connection) => *guard = Some(Conn::Pooled(connection)),
-                    Err(error) => {
-                        holder.released();
-                        return Err(cannot_get_connection(error));
-                    }
-                }
+                *guard = Some(Conn::Pooled(self.inner.acquire().await.map_err(cannot_get_connection)?));
             }
-            if let Err(error) = apply_timeout(&holder, guard.as_mut().expect("connection present")).await {
-                holder.released();
-                return Err(error);
-            }
+            apply_timeout(&holder, guard.as_mut().expect("connection present")).await?;
+            holder.requested();
             return Ok(TransactionalConnection(Handle::Held { guard, holder }));
         }
 
@@ -201,7 +208,6 @@ impl TransactionalPool {
         }
 
         let holder = Arc::new(ConnectionHolder::new(Conn::Pooled(connection)));
-        holder.requested();
         synchronization::register_synchronization(Arc::new(ConnectionSynchronization {
             holder: holder.clone(),
             key: self.key.clone(),
@@ -209,13 +215,14 @@ impl TransactionalPool {
         }))?;
         holder.set_synchronized_with_transaction(true);
         synchronization::bind_resource(self.key.clone(), BoundResource::holder(holder.clone()))?;
-        let guard = holder.lock().await;
+        let guard = holder.lock()?;
+        holder.requested();
         Ok(TransactionalConnection(Handle::Held { guard, holder }))
     }
 }
 
 fn cannot_get_connection(error: sqlx::Error) -> TransactionError {
-    TransactionError::CannotCreateTransaction { message: "Failed to obtain connection".into(), source: Some(error.into()) }
+    TransactionError::CannotGetConnection { message: "Failed to obtain connection".into(), source: Some(error.into()) }
 }
 
 async fn apply_timeout(holder: &ConnectionHolder, connection: &mut Conn) -> Result<(), TransactionError> {
@@ -351,8 +358,6 @@ impl PgTransactionObject {
 
 pub struct PgTransactionDriver {
     pool: TransactionalPool,
-    nested_transaction_allowed: bool,
-    default_timeout: Option<Duration>,
 }
 
 fn begin_statement(definition: &TransactionDefinition) -> String {
@@ -370,16 +375,26 @@ fn begin_statement(definition: &TransactionDefinition) -> String {
     statement
 }
 
-async fn execute_on(holder: &ConnectionHolder, statement: String, message: &str) -> Result<(), TransactionError> {
-    let mut guard = holder.lock().await;
+async fn execute_on(holder: &ConnectionHolder, statement: String) -> Result<(), SavepointError> {
+    let mut guard = holder.lock().map_err(SavepointError::State)?;
     let connection = guard
         .as_mut()
-        .ok_or_else(|| TransactionError::Usage("Connection holder has no connection".into()))?;
-    sqlx::query(AssertSqlSafe(statement))
-        .execute(connection.connection())
-        .await
-        .map(|_| ())
-        .map_err(|error| TransactionError::system(message, error))
+        .ok_or_else(|| SavepointError::State(TransactionError::Usage("Connection holder has no connection".into())))?;
+    sqlx::query(AssertSqlSafe(statement)).execute(connection.connection()).await.map(|_| ()).map_err(SavepointError::Sql)
+}
+
+enum SavepointError {
+    State(TransactionError),
+    Sql(sqlx::Error),
+}
+
+impl SavepointError {
+    fn into_system(self, message: &str) -> TransactionError {
+        match self {
+            Self::State(error) => error,
+            Self::Sql(error) => TransactionError::system(message, error),
+        }
+    }
 }
 
 fn savepoint_name(savepoint: &Savepoint) -> Result<&str, TransactionError> {
@@ -393,11 +408,11 @@ impl TransactionDriver for PgTransactionDriver {
     type Transaction = PgTransactionObject;
     type Suspended = Arc<ConnectionHolder>;
 
-    fn transaction(&self, _settings: &ManagerSettings) -> Result<Self::Transaction, TransactionError> {
+    fn transaction(&self, settings: &ManagerSettings) -> Result<Self::Transaction, TransactionError> {
         Ok(PgTransactionObject {
             holder: Mutex::new(self.pool.bound_holder()),
             new_connection_holder: AtomicBool::new(false),
-            savepoint_allowed: self.nested_transaction_allowed,
+            savepoint_allowed: settings.nested_transaction_allowed,
         })
     }
 
@@ -409,7 +424,7 @@ impl TransactionDriver for PgTransactionDriver {
         &self,
         transaction: &Self::Transaction,
         definition: &TransactionDefinition,
-        _settings: &ManagerSettings,
+        settings: &ManagerSettings,
     ) -> Result<(), TransactionError> {
         let existing = transaction.holder();
         if let Some(holder) = &existing
@@ -430,7 +445,7 @@ impl TransactionDriver for PgTransactionDriver {
         let holder = Arc::new(ConnectionHolder::new(Conn::Transaction(started)));
         holder.set_synchronized_with_transaction(true);
         holder.set_transaction_active(true);
-        if let Some(timeout) = definition.timeout.or(self.default_timeout) {
+        if let Some(timeout) = definition.timeout.or(settings.default_timeout) {
             holder.set_timeout(timeout);
         }
         transaction.set_holder(Some(holder.clone()), true);
@@ -464,7 +479,7 @@ impl TransactionDriver for PgTransactionDriver {
         let holder = transaction
             .holder()
             .ok_or_else(|| TransactionError::Usage("No connection holder for commit".into()))?;
-        let connection = holder.lock().await.take();
+        let connection = holder.lock()?.take();
         match connection {
             Some(Conn::Transaction(started)) => {
                 started.commit().await.map_err(|error| TransactionError::system("JDBC commit failed", error))
@@ -477,7 +492,7 @@ impl TransactionDriver for PgTransactionDriver {
         let holder = transaction
             .holder()
             .ok_or_else(|| TransactionError::Usage("No connection holder for rollback".into()))?;
-        let connection = holder.lock().await.take();
+        let connection = holder.lock()?.take();
         match connection {
             Some(Conn::Transaction(started)) => {
                 started.rollback().await.map_err(|error| TransactionError::system("JDBC rollback failed", error))
@@ -506,6 +521,19 @@ impl TransactionDriver for PgTransactionDriver {
         }
     }
 
+    fn abandon(&self, transaction: &Self::Transaction) {
+        if transaction.is_new_connection_holder() {
+            synchronization::unbind_resource_if_possible(&self.pool.key);
+        }
+        if let Some(holder) = transaction.holder() {
+            holder.abandon();
+        }
+    }
+
+    fn resume_abandoned(&self, suspended: Self::Suspended) {
+        let _ = synchronization::bind_resource(self.pool.key.clone(), BoundResource::holder(suspended));
+    }
+
     fn is_rollback_only(&self, transaction: &Self::Transaction) -> bool {
         transaction.holder().is_some_and(|holder| holder.is_rollback_only())
     }
@@ -523,11 +551,12 @@ impl TransactionDriver for PgTransactionDriver {
             });
         }
         let name = holder.next_savepoint_name();
-        execute_on(&holder, format!("SAVEPOINT {name}"), "Could not create JDBC savepoint").await.map_err(|error| {
-            TransactionError::CannotCreateTransaction {
+        execute_on(&holder, format!("SAVEPOINT {name}")).await.map_err(|error| match error {
+            SavepointError::State(error) => error,
+            SavepointError::Sql(error) => TransactionError::CannotCreateTransaction {
                 message: "Could not create JDBC savepoint".into(),
                 source: Some(error.into()),
-            }
+            },
         })?;
         Ok(Arc::new(name))
     }
@@ -539,7 +568,9 @@ impl TransactionDriver for PgTransactionDriver {
     ) -> Result<(), TransactionError> {
         let holder = transaction.holder_for_savepoint()?;
         let name = savepoint_name(savepoint)?;
-        execute_on(&holder, format!("ROLLBACK TO SAVEPOINT {name}"), "Could not roll back to JDBC savepoint").await?;
+        execute_on(&holder, format!("ROLLBACK TO SAVEPOINT {name}"))
+            .await
+            .map_err(|error| error.into_system("Could not roll back to JDBC savepoint"))?;
         holder.reset_rollback_only();
         Ok(())
     }
@@ -551,8 +582,19 @@ impl TransactionDriver for PgTransactionDriver {
     ) -> Result<(), TransactionError> {
         let holder = transaction.holder_for_savepoint()?;
         let name = savepoint_name(savepoint)?;
-        execute_on(&holder, format!("RELEASE SAVEPOINT {name}"), "Could not explicitly release JDBC savepoint").await
+        match execute_on(&holder, format!("RELEASE SAVEPOINT {name}")).await {
+            Ok(()) => Ok(()),
+            Err(SavepointError::Sql(error)) if release_failure_is_ignorable(&error) => Ok(()),
+            Err(error) => Err(error.into_system("Could not explicitly release JDBC savepoint")),
+        }
     }
+}
+
+fn release_failure_is_ignorable(error: &sqlx::Error) -> bool {
+    let code_matches =
+        error.as_database_error().and_then(|database| database.code()).is_some_and(|code| code == "3B001");
+    let message = error.to_string();
+    code_matches || message.contains("not supported") || message.contains("3B001")
 }
 
 pub type PgTransactionManager = TransactionManager<PgTransactionDriver>;
@@ -562,12 +604,5 @@ pub fn manager(pool: TransactionalPool) -> PgTransactionManager {
 }
 
 pub fn manager_with_settings(pool: TransactionalPool, settings: ManagerSettings) -> PgTransactionManager {
-    TransactionManager::with_settings(
-        PgTransactionDriver {
-            pool,
-            nested_transaction_allowed: settings.nested_transaction_allowed,
-            default_timeout: settings.default_timeout,
-        },
-        settings,
-    )
+    TransactionManager::with_settings(PgTransactionDriver { pool }, settings)
 }

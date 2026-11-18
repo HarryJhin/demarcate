@@ -116,10 +116,7 @@ impl Service {
 }
 
 async fn service() -> Option<Arc<Service>> {
-    let Ok(url) = std::env::var("DEMARCATE_TEST_DATABASE_URL") else {
-        eprintln!("DEMARCATE_TEST_DATABASE_URL is not set; skipping");
-        return None;
-    };
+    let url = std::env::var("DEMARCATE_TEST_DATABASE_URL").expect("DEMARCATE_TEST_DATABASE_URL must be set");
     let connections = sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await.unwrap();
     sqlx::query("drop table if exists demarcate_service").execute(&connections).await.unwrap();
     sqlx::query("create table demarcate_service(v text)").execute(&connections).await.unwrap();
@@ -133,6 +130,7 @@ async fn reset(service: &Service) {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn declarative_transactions_on_postgres() {
     let Some(service) = service().await else { return };
     let service = &service;

@@ -90,6 +90,10 @@ pub trait TransactionDriver: Send + Sync + 'static {
         async {}
     }
 
+    fn abandon(&self, _transaction: &Self::Transaction) {}
+
+    fn resume_abandoned(&self, _suspended: Self::Suspended) {}
+
     fn is_rollback_only(&self, _transaction: &Self::Transaction) -> bool {
         false
     }

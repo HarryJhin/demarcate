@@ -32,6 +32,17 @@ async fn transaction_should_succeed() {
 }
 
 #[tokio::test]
+async fn two_transactions_should_succeed() {
+    let tm = CallCountingTransactionManager::new();
+    for name in ["test::get_name", "test::set_name"] {
+        invoke_with_manager(tm.clone(), TransactionAttribute::new(), name, async { Ok::<_, AppError>(()) })
+            .await
+            .unwrap();
+    }
+    assert_eq!(tm.counts(), [2, 2, 0]);
+}
+
+#[tokio::test]
 async fn enclosing_transaction_with_nested_transaction_on_advised_inside() {
     let tm = CallCountingTransactionManager::new();
     let outer = TransactionAttribute::with_definition(TransactionDefinition::with_propagation(Propagation::Required));
@@ -62,7 +73,7 @@ async fn do_test_rollback_on_exception(should_rollback: bool, rollback_exception
     let tm = CallCountingTransactionManager::new();
     if rollback_exception {
         tm.fail_rollback.store(true, Ordering::SeqCst);
-        tm.fail_commit.store(true, Ordering::SeqCst);
+        tm.fail_commit_with_system_exception.store(true, Ordering::SeqCst);
     }
     let attribute = if should_rollback {
         TransactionAttribute::new()
@@ -77,8 +88,7 @@ async fn do_test_rollback_on_exception(should_rollback: bool, rollback_exception
     assert_eq!(tm.counts(), expected_counts);
     match (rollback_exception, should_rollback, result) {
         (false, _, Err(AppError::Business("expected"))) => {}
-        (true, true, Err(AppError::Transaction(TransactionError::System { .. }))) => {}
-        (true, false, Err(AppError::Transaction(TransactionError::UnexpectedRollback(_)))) => {}
+        (true, _, Err(AppError::Transaction(TransactionError::System { .. }))) => {}
         (_, _, other) => panic!("unexpected result: {other:?}"),
     }
 }

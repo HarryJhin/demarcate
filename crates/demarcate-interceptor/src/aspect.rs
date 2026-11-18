@@ -1,11 +1,10 @@
 use std::any::{TypeId, type_name};
 use std::cell::RefCell;
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::panic::resume_unwind;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
-use demarcate_core::{PlatformTransactionManager, TransactionError, TransactionStatus, synchronization};
+use demarcate_core::{CatchUnwind, PlatformTransactionManager, TransactionError, TransactionStatus, synchronization};
 
 use crate::attribute::TransactionAttribute;
 use crate::registry::registry;
@@ -40,25 +39,11 @@ pub fn current_transaction_status() -> Result<Arc<dyn TransactionStatus>, Transa
     })
 }
 
-struct Restore;
+struct Restore(Arc<TransactionInfo>);
 
 impl Drop for Restore {
     fn drop(&mut self) {
-        let _ = INFO.try_with(|stack| stack.borrow_mut().pop());
-    }
-}
-
-struct CatchUnwind<F>(Pin<Box<F>>);
-
-impl<F: Future> Future for CatchUnwind<F> {
-    type Output = std::thread::Result<F::Output>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match catch_unwind(AssertUnwindSafe(|| self.0.as_mut().poll(cx))) {
-            Ok(Poll::Pending) => Poll::Pending,
-            Ok(Poll::Ready(output)) => Poll::Ready(Ok(output)),
-            Err(panic) => Poll::Ready(Err(panic)),
-        }
+        let _ = INFO.try_with(|stack| stack.borrow_mut().retain(|info| !Arc::ptr_eq(info, &self.0)));
     }
 }
 
@@ -111,16 +96,11 @@ where
 
     let status = manager.transaction(Some(&attribute.definition)).await?;
     let rollback = attribute.rollback_on_type(TypeId::of::<E>(), type_name::<E>());
-    INFO.with(|stack| {
-        stack.borrow_mut().push(Arc::new(TransactionInfo {
-            attribute,
-            joinpoint_identification,
-            status: status.clone(),
-        }))
-    });
-    let restore = Restore;
+    let info = Arc::new(TransactionInfo { attribute, joinpoint_identification, status: status.clone() });
+    INFO.with(|stack| stack.borrow_mut().push(info.clone()));
+    let restore = Restore(info);
 
-    let outcome = CatchUnwind(invocation).await;
+    let outcome = CatchUnwind::boxed(invocation).await;
 
     match outcome {
         Err(panic) => {

@@ -19,10 +19,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new(name: &str) -> Option<Self> {
-        let Ok(url) = std::env::var("DEMARCATE_TEST_DATABASE_URL") else {
-            eprintln!("DEMARCATE_TEST_DATABASE_URL is not set; skipping {name}");
-            return None;
-        };
+        let url = std::env::var("DEMARCATE_TEST_DATABASE_URL").expect("DEMARCATE_TEST_DATABASE_URL must be set");
         let connections = sqlx::postgres::PgPoolOptions::new().max_connections(4).connect(&url).await.unwrap();
         let table = format!("demarcate_{name}");
         sqlx::query(AssertSqlSafe(format!("drop table if exists {table}"))).execute(&connections).await.unwrap();
@@ -153,6 +150,7 @@ impl TransactionSynchronization for RecordingSynchronization {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn transaction_commit() {
     let Some(f) = Fixture::new("commit").await else { return };
     let f = &f;
@@ -182,6 +180,7 @@ async fn transaction_commit() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn transaction_rollback_on_error() {
     let Some(f) = Fixture::new("rollback").await else { return };
     let f = &f;
@@ -259,16 +258,19 @@ async fn assert_participating_transaction_with_rollback_only(name: &str, fail_ea
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn participating_transaction_with_rollback_only() {
     assert_participating_transaction_with_rollback_only("participating_rollback_only", false).await;
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn participating_transaction_with_rollback_only_and_fail_early() {
     assert_participating_transaction_with_rollback_only("participating_fail_early", true).await;
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn participating_transaction_with_incompatible_isolation_level() {
     let Some(f) = Fixture::new("incompatible_isolation").await else { return };
     let f = &f;
@@ -294,6 +296,7 @@ async fn participating_transaction_with_incompatible_isolation_level() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn participating_transaction_with_incompatible_read_only() {
     let Some(f) = Fixture::new("incompatible_read_only").await else { return };
     let f = &f;
@@ -316,6 +319,7 @@ async fn participating_transaction_with_incompatible_read_only() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn propagation_requires_new_with_existing_transaction() {
     let Some(f) = Fixture::new("requires_new").await else { return };
     let f = &f;
@@ -347,6 +351,7 @@ async fn propagation_requires_new_with_existing_transaction() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn propagation_not_supported_with_existing_transaction() {
     let Some(f) = Fixture::new("not_supported").await else { return };
     let f = &f;
@@ -378,6 +383,7 @@ async fn propagation_not_supported_with_existing_transaction() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn propagation_never_with_existing_transaction() {
     let Some(f) = Fixture::new("never").await else { return };
     let f = &f;
@@ -399,6 +405,7 @@ async fn propagation_never_with_existing_transaction() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn propagation_supports_and_requires_new_with_early_access() {
     let Some(f) = Fixture::new("supports_requires_new").await else { return };
     let f = &f;
@@ -428,6 +435,7 @@ async fn propagation_supports_and_requires_new_with_early_access() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn transaction_with_isolation_and_read_only() {
     let Some(f) = Fixture::new("isolation_read_only").await else { return };
     let f = &f;
@@ -453,6 +461,7 @@ async fn transaction_with_isolation_and_read_only() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn transaction_with_propagation_supports() {
     let Some(f) = Fixture::new("supports").await else { return };
     let f = &f;
@@ -471,6 +480,7 @@ async fn transaction_with_propagation_supports() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn existing_transaction_with_propagation_nested_and_rollback() {
     let Some(f) = Fixture::new("nested_rollback").await else { return };
     let f = &f;
@@ -514,6 +524,7 @@ async fn existing_transaction_with_propagation_nested_and_rollback() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn existing_transaction_with_propagation_nested_and_required_rollback_only() {
     let Some(f) = Fixture::new("nested_required_rollback_only").await else { return };
     let f = &f;
@@ -545,6 +556,7 @@ async fn existing_transaction_with_propagation_nested_and_required_rollback_only
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn existing_transaction_with_manual_savepoint_and_rollback() {
     let Some(f) = Fixture::new("manual_savepoint").await else { return };
     let f = &f;
@@ -564,6 +576,7 @@ async fn existing_transaction_with_manual_savepoint_and_rollback() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn transaction_with_propagation_nested_without_existing_transaction() {
     let Some(f) = Fixture::new("nested_new").await else { return };
     let f = &f;
@@ -583,6 +596,7 @@ async fn transaction_with_propagation_nested_without_existing_transaction() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn transaction_with_timeout() {
     let Some(f) = Fixture::new("timeout").await else { return };
     let f = &f;
@@ -603,6 +617,7 @@ async fn transaction_with_timeout() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
 async fn dropped_future_rolls_back_and_releases_task_state() {
     let Some(f) = Fixture::new("dropped").await else { return };
     let f = &f;
@@ -620,7 +635,6 @@ async fn dropped_future_rolls_back_and_releases_task_state() {
         assert!(cancelled.is_err());
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(f.rows().await.is_empty());
-        tsm::unbind_resource_if_possible(f.pool.resource_key());
     })
     .await;
 }

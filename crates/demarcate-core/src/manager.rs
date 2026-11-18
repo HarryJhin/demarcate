@@ -63,6 +63,25 @@ impl Default for ManagerSettings {
     }
 }
 
+impl<D: TransactionDriver> SuspendedResourcesHolder<D> {
+    pub(crate) fn restore_abandoned(self, driver: &D) {
+        if let Some(suspended_resources) = self.suspended_resources {
+            driver.resume_abandoned(suspended_resources);
+        }
+        if let Some(suspended_synchronizations) = self.suspended_synchronizations {
+            synchronization::set_actual_transaction_active(self.was_active);
+            synchronization::set_current_transaction_isolation_level(self.isolation_level);
+            synchronization::set_current_transaction_read_only(self.read_only);
+            synchronization::set_current_transaction_name(self.name);
+            if synchronization::init_synchronization().is_ok() {
+                for suspended in suspended_synchronizations {
+                    let _ = synchronization::register_synchronization(suspended);
+                }
+            }
+        }
+    }
+}
+
 pub struct TransactionManager<D: TransactionDriver> {
     driver: Arc<D>,
     settings: ManagerSettings,
@@ -235,14 +254,15 @@ impl<D: TransactionDriver> TransactionManager<D> {
             self.new_transaction_status(definition, Some(transaction), true, new_synchronization, nested, suspended);
         self.notify(|listener| listener.before_begin(status.as_ref()));
         let begun = self.driver.begin(status.transaction().expect("transaction present"), definition, &self.settings).await;
-        let prepared = match begun {
-            Ok(()) => self.prepare_synchronization(&status, definition),
-            Err(error) => Err(error),
-        };
-        if let Err(error) = prepared {
+        if let Err(error) = begun {
             self.notify(|listener| listener.after_begin(status.as_ref(), Some(&error)));
-            status.set_completed();
             let suspended = status.take_suspended_resources();
+            status.set_completed();
+            return Err((error, suspended, status));
+        }
+        if let Err(error) = self.prepare_synchronization(&status, definition) {
+            let suspended = status.take_suspended_resources();
+            status.set_completed();
             return Err((error, suspended, status));
         }
         self.notify(|listener| listener.after_begin(status.as_ref(), None));
@@ -404,6 +424,10 @@ impl<D: TransactionDriver> TransactionManager<D> {
             ));
         }
         let status = self.downcast(status)?;
+        if !status.is_in_order() {
+            self.process_rollback(status, false).await?;
+            return Err(TransactionError::InvalidState(synchronization::OUT_OF_ORDER.into()));
+        }
         if status.is_local_rollback_only() {
             return self.process_rollback(status, false).await;
         }
@@ -421,7 +445,12 @@ impl<D: TransactionDriver> TransactionManager<D> {
             ));
         }
         let status = self.downcast(status)?;
-        self.process_rollback(status, false).await
+        let in_order = status.is_in_order();
+        self.process_rollback(status, false).await?;
+        if !in_order {
+            return Err(TransactionError::InvalidState(synchronization::OUT_OF_ORDER.into()));
+        }
+        Ok(())
     }
 
     async fn process_commit(&self, status: &ManagedTransactionStatus<D>) -> Result<(), TransactionError> {

@@ -102,6 +102,9 @@ struct State {
     current_transaction_read_only: bool,
     current_transaction_isolation_level: Option<Isolation>,
     actual_transaction_active: bool,
+    scopes: Vec<u64>,
+    poisoned: Vec<u64>,
+    next_scope: u64,
 }
 
 tokio::task_local! {
@@ -138,6 +141,41 @@ pub fn is_context_active() -> bool {
 
 pub async fn scope<F: Future>(future: F) -> F::Output {
     STATE.scope(RefCell::new(State::default()), future).await
+}
+
+pub(crate) const OUT_OF_ORDER: &str = "Transaction boundaries on this task completed out of order. Two \
+     transactional calls ran concurrently on one task (for example with join! or select!), so they shared one \
+     task-bound transaction context. The transaction was rolled back. Await transactional calls one after \
+     another, or run each in its own task with demarcate_core::synchronization::spawn";
+
+pub(crate) fn enter_boundary() -> Option<u64> {
+    STATE
+        .try_with(|state| {
+            let mut state = state.borrow_mut();
+            state.next_scope += 1;
+            let id = state.next_scope;
+            state.scopes.push(id);
+            id
+        })
+        .ok()
+}
+
+pub(crate) fn boundary_in_order(id: Option<u64>) -> bool {
+    let Some(id) = id else { return true };
+    read(true, |state| state.scopes.last() == Some(&id) && !state.poisoned.contains(&id))
+}
+
+pub(crate) fn exit_boundary(id: Option<u64>) {
+    let Some(id) = id else { return };
+    let _ = STATE.try_with(|state| {
+        let mut state = state.borrow_mut();
+        state.poisoned.retain(|poisoned| *poisoned != id);
+        if let Some(position) = state.scopes.iter().position(|scope| *scope == id) {
+            let later: Vec<u64> = state.scopes.drain(position..).skip(1).collect();
+            state.scopes.extend(later.iter().copied());
+            state.poisoned.extend(later);
+        }
+    });
 }
 
 pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
@@ -354,6 +392,13 @@ impl TransactionSynchronization for SynchronizedResource {
     }
 }
 
+fn callback_error(error: BoxError) -> TransactionError {
+    match error.downcast::<TransactionError>() {
+        Ok(error) => *error,
+        Err(error) => TransactionError::Other(error),
+    }
+}
+
 pub async fn trigger_flush() -> Result<(), TransactionError> {
     if is_synchronization_active() {
         for synchronization in synchronizations()? {
@@ -383,7 +428,7 @@ pub(crate) async fn trigger_savepoint_rollback(savepoint: &Savepoint) -> Result<
 
 pub async fn trigger_before_commit(read_only: bool) -> Result<(), TransactionError> {
     for synchronization in synchronizations()? {
-        synchronization.before_commit(read_only).await.map_err(TransactionError::Other)?;
+        synchronization.before_commit(read_only).await.map_err(callback_error)?;
     }
     Ok(())
 }
@@ -405,7 +450,7 @@ pub async fn invoke_after_commit(
     synchronizations: &[Arc<dyn TransactionSynchronization>],
 ) -> Result<(), TransactionError> {
     for synchronization in synchronizations {
-        synchronization.after_commit().await.map_err(TransactionError::Other)?;
+        synchronization.after_commit().await.map_err(callback_error)?;
     }
     Ok(())
 }

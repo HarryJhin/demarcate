@@ -296,6 +296,19 @@ impl TransactionDriver for DataSourceTransactionDriver {
         holder.clear();
     }
 
+    fn abandon(&self, transaction: &Self::Transaction) {
+        if transaction.is_new_connection_holder() {
+            synchronization::unbind_resource_if_possible(&data_source_key(&self.data_source));
+        }
+        if let Ok(holder) = transaction.connection_holder() {
+            holder.clear();
+        }
+    }
+
+    fn resume_abandoned(&self, suspended: Self::Suspended) {
+        let _ = synchronization::bind_resource(data_source_key(&self.data_source), suspended);
+    }
+
     fn is_rollback_only(&self, transaction: &Self::Transaction) -> bool {
         transaction.state().connection_holder.as_ref().is_some_and(|holder| holder.is_rollback_only())
     }

@@ -65,6 +65,7 @@ pub struct ManagedTransactionStatus<D: TransactionDriver> {
     rollback_only: AtomicBool,
     completed: AtomicBool,
     savepoint: Mutex<Option<Savepoint>>,
+    boundary: Option<u64>,
 }
 
 impl<D: TransactionDriver> ManagedTransactionStatus<D> {
@@ -91,6 +92,7 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
             rollback_only: AtomicBool::new(false),
             completed: AtomicBool::new(false),
             savepoint: Mutex::new(None),
+            boundary: synchronization::enter_boundary(),
         }
     }
 
@@ -112,6 +114,11 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
 
     pub(crate) fn set_completed(&self) {
         self.completed.store(true, Ordering::SeqCst);
+        synchronization::exit_boundary(self.boundary);
+    }
+
+    pub(crate) fn is_in_order(&self) -> bool {
+        synchronization::boundary_in_order(self.boundary)
     }
 
     pub(crate) fn take_suspended_resources(&self) -> Option<SuspendedResourcesHolder<D>> {
@@ -234,8 +241,22 @@ impl<D: TransactionDriver> TransactionStatus for ManagedTransactionStatus<D> {
 
 impl<D: TransactionDriver> Drop for ManagedTransactionStatus<D> {
     fn drop(&mut self) {
-        if !self.is_completed() && self.new_synchronization {
+        if self.is_completed() {
+            return;
+        }
+        synchronization::exit_boundary(self.boundary);
+        if self.new_synchronization {
             synchronization::clear();
+        }
+        if let Some(transaction) = &self.transaction {
+            if self.new_transaction {
+                self.driver.abandon(transaction);
+            } else if let Err(error) = self.driver.set_rollback_only(transaction) {
+                tracing::debug!(%error, "Could not mark the abandoned participating transaction as rollback-only");
+            }
+        }
+        if let Some(suspended) = self.take_suspended_resources() {
+            suspended.restore_abandoned(self.driver.as_ref());
         }
     }
 }

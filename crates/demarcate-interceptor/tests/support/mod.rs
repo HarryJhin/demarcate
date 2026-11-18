@@ -54,6 +54,7 @@ pub struct CallCountingTransactionManager {
     pub last_definition: Mutex<Option<TransactionDefinition>>,
     pub fail_begin: AtomicBool,
     pub fail_commit: AtomicBool,
+    pub fail_commit_with_system_exception: AtomicBool,
     pub fail_rollback: AtomicBool,
 }
 
@@ -88,6 +89,9 @@ impl PlatformTransactionManager for CallCountingTransactionManager {
     fn commit<'a>(&'a self, _status: &'a dyn TransactionStatus) -> BoxFuture<'a, Result<(), TransactionError>> {
         Box::pin(async move {
             self.commits.fetch_add(1, Ordering::SeqCst);
+            if self.fail_commit_with_system_exception.load(Ordering::SeqCst) {
+                return Err(TransactionError::System { message: "system exception".into(), source: None, application: None });
+            }
             if self.fail_commit.load(Ordering::SeqCst) {
                 return Err(TransactionError::UnexpectedRollback("Cannot commit".into()));
             }

@@ -6,6 +6,7 @@ use crate::error::TransactionError;
 use crate::manager::PlatformTransactionManager;
 use crate::status::TransactionStatus;
 use crate::synchronization;
+use crate::unwind::CatchUnwind;
 
 #[derive(Debug)]
 pub enum TemplateError<E> {
@@ -66,7 +67,16 @@ impl TransactionTemplate {
                 .transaction(Some(&self.definition))
                 .await
                 .map_err(TemplateError::Transaction)?;
-            match Box::pin(action(status.clone())).await {
+            let outcome = match CatchUnwind::new(action(status.clone())).await {
+                Ok(outcome) => outcome,
+                Err(panic) => {
+                    if let Err(error) = self.transaction_manager.rollback(status.as_ref()).await {
+                        tracing::error!(%error, "Application panic overridden by rollback error");
+                    }
+                    std::panic::resume_unwind(panic)
+                }
+            };
+            match outcome {
                 Ok(value) => {
                     self.transaction_manager.commit(status.as_ref()).await.map_err(TemplateError::Transaction)?;
                     Ok(value)
