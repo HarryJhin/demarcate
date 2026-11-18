@@ -94,3 +94,6 @@ pub use demarcate_sqlx::postgres;
 /// The SQLite driver and the transaction-aware pool, through sqlx.
 #[cfg(feature = "sqlx-sqlite")]
 pub use demarcate_sqlx::sqlite;
+/// The tokio-postgres driver and the transaction-aware pool, on deadpool-postgres.
+#[cfg(feature = "tokio-postgres")]
+pub use demarcate_tokio_postgres as tokio_postgres;

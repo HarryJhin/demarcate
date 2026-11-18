@@ -16,6 +16,7 @@ sqlx-postgres = ["dep:demarcate-sqlx", "demarcate-sqlx/postgres"]
 sqlx-mysql = ["dep:demarcate-sqlx", "demarcate-sqlx/mysql"]
 sqlx-sqlite = ["dep:demarcate-sqlx", "demarcate-sqlx/sqlite"]
 sea-orm = ["dep:demarcate-sea-orm"]
+tokio-postgres = ["dep:demarcate-tokio-postgres"]
 
 [dependencies]
 demarcate-connection = { path = "../demarcate-connection", version = "0.1.0" }
@@ -24,10 +25,13 @@ demarcate-interceptor = { path = "../demarcate-interceptor", version = "0.1.0" }
 demarcate-macros = { path = "../demarcate-macros", version = "0.1.0" }
 demarcate-sea-orm = { path = "../demarcate-sea-orm", version = "0.1.0", optional = true }
 demarcate-sqlx = { path = "../demarcate-sqlx", version = "0.1.0", optional = true, default-features = false }
+demarcate-tokio-postgres = { path = "../demarcate-tokio-postgres", version = "0.1.0", optional = true }
 
 [dev-dependencies]
-demarcate = { path = ".", features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sqlite", "sea-orm"] }
+demarcate = { path = ".", features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sqlite", "sea-orm", "tokio-postgres"] }
 futures-util = "0.3.32"
+deadpool-postgres = "0.14.1"
 sea-orm = { version = "2.0.4", default-features = false, features = ["runtime-tokio", "sqlx-postgres", "sqlx-mysql", "sqlx-sqlite", "macros"] }
 sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "postgres", "mysql", "sqlite"] }
 tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "time"] }
+tokio-postgres = "0.7.13"

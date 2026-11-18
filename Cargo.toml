@@ -8,6 +8,7 @@ members = [
     "crates/demarcate-macros",
     "crates/demarcate-sea-orm",
     "crates/demarcate-sqlx",
+    "crates/demarcate-tokio-postgres",
 ]
 
 [workspace.package]
