@@ -81,6 +81,10 @@ pub use demarcate_interceptor::{
 pub use demarcate_interceptor::{TransactionalReturn, assert_transactional_return};
 pub use demarcate_macros::transactional;
 
+/// The diesel-async drivers and the transaction-aware pools, on deadpool, for PostgreSQL, MySQL
+/// and MariaDB.
+#[cfg(any(feature = "diesel-async-postgres", feature = "diesel-async-mysql"))]
+pub use demarcate_diesel_async as diesel_async;
 /// The SeaORM driver and the transaction-aware connection, for PostgreSQL, MySQL, MariaDB and
 /// SQLite.
 #[cfg(feature = "sea-orm")]

@@ -17,4 +17,4 @@ git_release_enable = true
 git_release_name = "v{{ version }}"
 changelog_update = true
 changelog_path = "./CHANGELOG.md"
-changelog_include = ["demarcate-connection", "demarcate-core", "demarcate-interceptor", "demarcate-macros", "demarcate-sea-orm", "demarcate-sqlx", "demarcate-tokio-postgres"]
+changelog_include = ["demarcate-connection", "demarcate-core", "demarcate-diesel-async", "demarcate-interceptor", "demarcate-macros", "demarcate-sea-orm", "demarcate-sqlx", "demarcate-tokio-postgres"]

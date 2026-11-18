@@ -57,8 +57,8 @@ transaction. `audit` runs in its own transaction and commits even when
 
 ## Status
 
-Version 0.1 is the first release. The API can change before 1.0. The
-drivers are for sqlx with PostgreSQL, MySQL, MariaDB and SQLite.
+Version 0.1 is the first release. The API can change before 1.0. There
+are drivers for sqlx, SeaORM, tokio-postgres and diesel-async.
 
 ## Setup
 
@@ -77,6 +77,9 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 |:--|:--|:--|
 | Rust | 1.94 and later; sqlx 0.9 requires 1.94 | 1.94 and the current stable release |
 | sqlx | 0.9.1 and later 0.9 releases | 0.9.1, and weekly the newest release |
+| SeaORM | 2.0.4 and later 2 releases | 2.0.4, and weekly the newest release |
+| tokio-postgres, deadpool-postgres | 0.7.13 and later 0.7 releases; 0.14.1 and later 0.14 releases | those versions, and weekly the newest releases |
+| diesel-async, diesel | 0.10 releases; 2.4 and later 2 releases | 0.10.0 and 2.4.0, and weekly the newest releases |
 | tokio | 1.38 and later | 1.38, and weekly the newest release |
 | PostgreSQL | not limited | 18 |
 | MySQL | not limited | 8.4 |
@@ -88,8 +91,8 @@ dependency that `Cargo.toml` allows. A weekly job does the same with the
 newest versions.
 
 The same conformance tests run on every database. Where a database behaves
-differently, the tests assert that behaviour, and the section "Databases"
-lists it.
+differently, the tests assert that behaviour, and the section "Drivers"
+lists it. Every driver runs these tests on each of its databases.
 
 ## Setup
 
@@ -236,11 +239,28 @@ savepoints.
   of a Tokio worker thread in a debug build.
 - JTA, XML configuration and the reactive variant are not ported.
 
-## Databases
+## Drivers
 
-Enable one feature for each database: `sqlx-postgres`, `sqlx-mysql` (MySQL
-and MariaDB) or `sqlx-sqlite`. The modules `demarcate::postgres`,
-`demarcate::mysql` and `demarcate::sqlite` have the same items.
+Enable one feature for each connection library and database. Every driver
+module has a transaction-aware pool, a `manager` function and the same
+behaviour; the pool offers the query API of its library.
+
+| Feature | Module | Library | Databases | Data access |
+|:--|:--|:--|:--|:--|
+| `sqlx-postgres` | `demarcate::postgres` | sqlx | PostgreSQL | `sqlx::query(..).execute(&pool)` |
+| `sqlx-mysql` | `demarcate::mysql` | sqlx | MySQL, MariaDB | `sqlx::query(..).execute(&pool)` |
+| `sqlx-sqlite` | `demarcate::sqlite` | sqlx | SQLite | `sqlx::query(..).execute(&pool)` |
+| `sea-orm` | `demarcate::sea_orm` | SeaORM | PostgreSQL, MySQL, MariaDB, SQLite | `Entity::find().all(&database)` |
+| `tokio-postgres` | `demarcate::tokio_postgres` | tokio-postgres on deadpool-postgres | PostgreSQL | `pool.client().await?.query(..)` |
+| `diesel-async-postgres` | `demarcate::diesel_async::postgres` | diesel-async on deadpool | PostgreSQL | `query.load(&mut *pool.connection().await?)` |
+| `diesel-async-mysql` | `demarcate::diesel_async::mysql` | diesel-async on deadpool | MySQL, MariaDB | `query.load(&mut *pool.connection().await?)` |
+
+The sqlx and SeaORM drivers take the pool itself as the executor. The
+tokio-postgres and diesel-async drivers hand out the connection of the
+current transaction; drop it before the next request and before calling
+another transactional function.
+
+### Databases
 
 | | PostgreSQL | MySQL, MariaDB | SQLite |
 |:--|:--|:--|:--|
@@ -253,12 +273,27 @@ and MariaDB) or `sqlx-sqlite`. The modules `demarcate::postgres`,
 
 MySQL and MariaDB roll the whole transaction back when a statement fails
 with a deadlock (SQLSTATE `40001`), and the connection then runs in
-autocommit mode. After that error, every further query of the transaction
-through `TransactionalPool` returns an error and does not run, and the
-transaction cannot commit.
+autocommit mode. The sqlx and SeaORM drivers see that error: every further
+query of the transaction returns an error and does not run, and the
+transaction cannot commit. The diesel-async driver does not see the errors
+of statements, so it cannot detect a deadlock; return the error from the
+transactional function.
+
+The tokio-postgres and diesel-async drivers do not see a failed statement
+on PostgreSQL either. Their commit asks the server whether the transaction
+is usable, which costs one round trip.
 
 SQLite allows one writer at a time. Use the WAL journal mode, so that
 readers and the writer do not block each other.
+
+### Another library
+
+`demarcate-connection` holds the transaction logic that is the same for
+every connection library. A driver implements its `ConnectionBackend`
+trait: how to obtain a connection, begin, commit, roll back and run a
+savepoint statement. Each driver above is about 300 lines. A resource that
+is not a database connection implements `TransactionDriver` from
+`demarcate-core`.
 
 ## Checks that move to run time
 
@@ -285,11 +320,9 @@ loud:
 | `demarcate-interceptor` | transaction attribute, rollback rules, invocation flow, registry |
 | `demarcate-macros` | `#[transactional]` |
 | `demarcate-sqlx` | sqlx drivers for PostgreSQL, MySQL, MariaDB and SQLite, `TransactionalPool` |
-
-A driver for another connection library implements `ConnectionBackend`
-from `demarcate-connection`: how to obtain a connection, begin, commit,
-roll back and run a savepoint statement. A resource that is not a database
-connection implements `TransactionDriver` from `demarcate-core`.
+| `demarcate-sea-orm` | SeaORM driver, `TransactionalDatabase` |
+| `demarcate-tokio-postgres` | tokio-postgres driver on deadpool-postgres |
+| `demarcate-diesel-async` | diesel-async drivers on deadpool for PostgreSQL, MySQL and MariaDB |
 
 ## Tests
 
