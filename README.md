@@ -62,9 +62,12 @@ PostgreSQL through sqlx is implemented.
 
 ## Setup
 
+demarcate is not on crates.io yet. Depend on a release tag of this
+repository:
+
 ```toml
 [dependencies]
-demarcate = { version = "0.1", features = ["sqlx-postgres"] }
+demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.1.0", features = ["sqlx-postgres"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 ```
 

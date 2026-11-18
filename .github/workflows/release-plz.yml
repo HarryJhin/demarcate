@@ -14,13 +14,15 @@ jobs:
       pull-requests: read
     steps:
       - &checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
       - &toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - uses: release-plz/action@v0.5
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
         with:
           command: release
         env:
@@ -39,7 +41,7 @@ jobs:
     steps:
       - *checkout
       - *toolchain
-      - uses: release-plz/action@v0.5
+      - uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
         with:
           command: release-pr
         env:
