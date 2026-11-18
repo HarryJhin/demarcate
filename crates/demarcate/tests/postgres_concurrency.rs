@@ -326,6 +326,17 @@ impl Service {
     }
 
     #[transactional]
+    async fn ignores_a_failed_statement_then_runs_something_harmless(&self) -> Result<(), ServiceError> {
+        use sqlx::Executor as _;
+        self.insert("outer").await?;
+        assert!(sqlx::query("select missing_column from demarcate_no_such_table").execute(&self.pool).await.is_err());
+        let _ = sqlx::raw_sql("").execute(&self.pool).await;
+        let _ = sqlx::raw_sql("-- nothing").execute(&self.pool).await;
+        let _ = (&self.pool).prepare(sqlx::SqlStr::from_static("select 1")).await;
+        Ok(())
+    }
+
+    #[transactional]
     async fn leaves_a_savepoint_open(&self) -> Result<(), ServiceError> {
         demarcate::current_transaction_status()?.create_savepoint().await?;
         self.insert("inner").await
@@ -705,4 +716,10 @@ async fn transactions_hold_when_futures_run_beside_transactional_calls() {
     let rows = service.rows().await;
     assert!(!rows.contains(&"dropped".to_owned()), "the dropped call was committed: {result:?} {rows:?}");
     assert_eq!(idle_in_transaction(&service).await, 0);
+
+    reset(&service).await;
+    sqlx::query("select 1").execute(&service.pool).await.unwrap();
+    let result = service.ignores_a_failed_statement_then_runs_something_harmless().await;
+    assert!(result.is_err(), "an empty statement or a prepare does not show that the transaction recovered");
+    assert!(service.rows().await.is_empty());
 }

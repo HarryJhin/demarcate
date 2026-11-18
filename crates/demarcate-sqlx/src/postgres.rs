@@ -126,9 +126,6 @@ impl ConnectionHolder {
     fn set_rollback_only_for_good(&self) {
         *self.rollback_only_depth.lock().expect("rollback-only lock") = Some(0);
     }
-    fn statement_succeeded(&self) {
-        *self.aborted_depth.lock().expect("aborted lock") = None;
-    }
     fn savepoint_rolled_back(&self, name: &str) {
         let Some(index) = self.savepoint_index(name) else { return };
         for marked in [&self.rollback_only_depth, &self.aborted_depth] {
@@ -370,9 +367,6 @@ impl<'p> sqlx::Executor<'p> for &'_ TransactionalPool {
                 match rows.try_next().await {
                     Ok(Some(step)) => yield step,
                     Ok(None) => {
-                        if let Some(holder) = &transaction {
-                            holder.statement_succeeded();
-                        }
                         break;
                     }
                     Err(error) => {
@@ -474,11 +468,10 @@ impl TransactionalConnection {
     }
 
     fn statement_finished(&self, error: Option<&sqlx::Error>) {
-        let Some(holder) = self.transaction_holder() else { return };
-        match error {
-            None => holder.statement_succeeded(),
-            Some(error) if error.as_database_error().is_some() => holder.mark_aborted(),
-            Some(_) => {}
+        if let Some(holder) = self.transaction_holder()
+            && error.is_some_and(|error| error.as_database_error().is_some())
+        {
+            holder.mark_aborted();
         }
     }
 }
@@ -622,10 +615,7 @@ async fn execute_on(holder: &ConnectionHolder, statement: String) -> Result<(), 
         ))
     })?;
     match sqlx::query(AssertSqlSafe(statement)).execute(connection.connection()).await {
-        Ok(_) => {
-            holder.statement_succeeded();
-            Ok(())
-        }
+        Ok(_) => Ok(()),
         Err(error) => {
             holder.mark_aborted();
             Err(SavepointError::Sql(error))
@@ -733,17 +723,17 @@ impl TransactionDriver for PgTransactionDriver {
             transaction.holder().ok_or_else(|| TransactionError::Usage("No connection holder for commit".into()))?;
         let connection = holder.lock()?.take();
         match connection {
-            Some(Conn::Transaction(started)) if holder.is_aborted() => {
-                started.rollback().await.map_err(|error| TransactionError::system("Rollback failed", error))?;
-                Err(TransactionError::UnexpectedRollback(
-                    "Transaction rolled back because a statement in it failed. PostgreSQL aborts a transaction \
+            Some(Conn::Transaction(mut started)) => {
+                if holder.is_aborted() && sqlx::query("select 1").execute(&mut *started).await.is_err() {
+                    started.rollback().await.map_err(|error| TransactionError::system("Rollback failed", error))?;
+                    return Err(TransactionError::UnexpectedRollback(
+                        "Transaction rolled back because a statement in it failed. PostgreSQL aborts a transaction \
                      when a statement fails, and the failure was not returned from the transactional function. \
                      Return the error, or run the statement that may fail in a nested transaction \
                      (propagation = Nested)"
-                        .into(),
-                ))
-            }
-            Some(Conn::Transaction(started)) => {
+                            .into(),
+                    ));
+                }
                 started.commit().await.map_err(|error| TransactionError::system("Commit failed", error))
             }
             Some(Conn::Pooled(_)) | None => Ok(()),
