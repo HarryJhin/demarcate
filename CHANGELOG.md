@@ -8,6 +8,16 @@ All crates of the workspace share one version.
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/HarryJhin/demarcate/compare/v0.1.0...v0.2.0) - 2026-11-18
+
+### Added
+
+- add drivers for more databases and connection libraries ([#5](https://github.com/HarryJhin/demarcate/pull/5))
+
+### Fixed
+
+- declare the dependency versions that are tested ([#3](https://github.com/HarryJhin/demarcate/pull/3))
+
 ## [0.1.0] - 2026-11-19
 
 First release.
