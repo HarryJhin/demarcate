@@ -206,7 +206,6 @@ impl TransactionalPool {
     }
 
     pub async fn acquire_in_transaction(&self) -> Result<TransactionalConnection, TransactionError> {
-        synchronization::check_access()?;
         if !self.bound_holder().is_some_and(|holder| holder.is_transaction_active()) {
             return Err(TransactionError::NoTransaction(
                 "No transaction is active for this pool on the current task. acquire_in_transaction() must be \
@@ -227,12 +226,19 @@ impl TransactionalPool {
     }
 
     async fn acquire_any(&self) -> Result<TransactionalConnection, TransactionError> {
-        synchronization::check_access()?;
         let synchronized = synchronization::is_synchronization_active();
         if let Some(holder) = self.bound_holder() {
             let mut guard = holder.lock()?;
             if guard.is_none() {
-                *guard = Some(Conn::Pooled(self.inner.acquire().await.map_err(cannot_get_connection)?));
+                *guard = Some(if holder.is_transaction_active() {
+                    tracing::warn!(
+                        "Data access after the transaction completed: it participates in the completed \
+                         transaction and is not committed. Run it in a RequiresNew transaction to keep it"
+                    );
+                    Conn::Transaction(self.inner.begin().await.map_err(cannot_get_connection)?)
+                } else {
+                    Conn::Pooled(self.inner.acquire().await.map_err(cannot_get_connection)?)
+                });
             }
             apply_timeout(&holder, guard.as_mut().expect("connection present")).await?;
             holder.requested();
@@ -413,11 +419,6 @@ impl TransactionSynchronization for ConnectionSynchronization {
             }
             Ok(())
         })
-    }
-    fn resume_abandoned(&self) {
-        if self.holder_active.load(Ordering::SeqCst) {
-            let _ = synchronization::bind_resource(self.key.clone(), BoundResource::holder(self.holder.clone()));
-        }
     }
     fn before_completion(&self) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async {
@@ -642,16 +643,9 @@ impl TransactionDriver for PgTransactionDriver {
     }
 
     fn abandon(&self, transaction: &Self::Transaction) {
-        if transaction.is_new_connection_holder() {
-            synchronization::unbind_resource_if_possible(&self.pool.key);
-        }
         if let Some(holder) = transaction.holder() {
             holder.abandon();
         }
-    }
-
-    fn resume_abandoned(&self, suspended: Self::Suspended) {
-        let _ = synchronization::bind_resource(self.pool.key.clone(), BoundResource::holder(suspended));
     }
 
     fn is_rollback_only(&self, transaction: &Self::Transaction) -> bool {

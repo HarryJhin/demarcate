@@ -131,20 +131,12 @@ async fn transaction_template_with_error() {
     con.log.verify("close");
 }
 
-fn assert_concurrent<T: std::fmt::Debug>(result: Result<T, TransactionError>) {
-    match result {
-        Err(TransactionError::InvalidState(message)) => {
-            assert!(message.contains("already running on this task"), "{message}");
-        }
-        other => panic!("unexpected result: {other:?}"),
-    }
-}
-
 #[tokio::test]
-async fn concurrent_call_on_one_task_is_rejected_at_entry() {
+async fn concurrent_calls_on_one_task_are_separate_transactions() {
     scoped(async {
-        let con = Con::new();
-        let ds = &MockDataSource::returning(&[&con]);
+        let con1 = Con::new();
+        let con2 = Con::new();
+        let ds = &MockDataSource::returning(&[&con1, &con2]);
         let tm = &manager(ds);
         let tt = &template(tm, TransactionDefinition::new());
 
@@ -158,42 +150,54 @@ async fn concurrent_call_on_one_task_is_rejected_at_entry() {
             tokio::time::sleep(Duration::from_millis(10)).await;
             assert!(!has_resource(ds), "a sibling future does not see the other call's transaction");
             assert!(!tsm::is_actual_transaction_active());
-            execute(tt, |_status| async move { Ok(()) }).await
+            execute(tt, |status| async move {
+                assert!(status.is_new_transaction(), "the sibling call does not join the other call");
+                Ok(())
+            })
+            .await
         };
         let (first, second) = tokio::join!(first, second);
 
         first.unwrap();
-        assert_concurrent(second);
-        con.log.verify("commit");
-        con.log.verify_times("rollback", 0);
+        second.unwrap();
+        con1.log.verify("commit");
+        con2.log.verify("commit");
+        con1.log.verify_times("rollback", 0);
+        con2.log.verify_times("rollback", 0);
         assert!(!has_resource(ds));
     })
     .await;
 }
 
 #[tokio::test]
-async fn concurrent_requires_new_that_would_finish_first_is_rejected() {
+async fn concurrent_requires_new_that_finishes_first_leaves_the_other_running() {
     scoped(async {
-        let con1 = Con::new();
-        let con2 = Con::new();
-        let ds = &MockDataSource::returning(&[&con1, &con2]);
+        let con1 = &Con::new();
+        let con2 = &Con::new();
+        let ds = &MockDataSource::returning(&[con1, con2]);
         let tm = &manager(ds);
         let tt = &template(tm, def(Propagation::RequiresNew));
 
         let slow = execute(tt, |_status| async move {
             tokio::time::sleep(Duration::from_millis(80)).await;
+            assert!(con1.is(&utils::connection(ds).await?), "the slow call still has its own connection");
             Ok(())
         });
         let fast = async {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            execute(tt, |_status| async move { Ok(()) }).await
+            execute(tt, |_status| async move {
+                assert!(con2.is(&utils::connection(ds).await?));
+                Ok(())
+            })
+            .await
         };
         let (slow, fast) = tokio::join!(slow, fast);
 
         slow.unwrap();
-        assert_concurrent(fast);
+        fast.unwrap();
         con1.log.verify("commit");
-        con2.log.verify_no_interactions();
+        con2.log.verify("commit");
+        assert!(!has_resource(ds));
     })
     .await;
 }
@@ -203,7 +207,8 @@ async fn concurrent_requires_new_inside_a_transaction_keeps_the_outer_transactio
     scoped(async {
         let con1 = &Con::new();
         let con2 = &Con::new();
-        let ds = &MockDataSource::returning(&[con1, con2]);
+        let con3 = &Con::new();
+        let ds = &MockDataSource::returning(&[con1, con2, con3]);
         let tm = &manager(ds);
         let outer = template(tm, TransactionDefinition::new());
 
@@ -215,12 +220,14 @@ async fn concurrent_requires_new_inside_a_transaction_keeps_the_outer_transactio
             });
             let second = async {
                 tokio::time::sleep(Duration::from_millis(5)).await;
+                assert!(con1.is(&utils::connection(ds).await?), "a sibling future sees the outer transaction");
+                assert!(tsm::is_actual_transaction_active());
                 execute(inner, |_inner| async move { Ok(()) }).await
             };
             let (first, second) = tokio::join!(first, second);
             first?;
-            assert_concurrent(second);
-            assert!(con1.is(&utils::connection(ds).await?), "the outer transaction is bound again");
+            second?;
+            assert!(con1.is(&utils::connection(ds).await?), "the outer transaction is still bound");
             assert!(tsm::is_actual_transaction_active());
             Ok(())
         })
@@ -228,6 +235,7 @@ async fn concurrent_requires_new_inside_a_transaction_keeps_the_outer_transactio
         .unwrap();
         con1.log.verify("commit");
         con2.log.verify("commit");
+        con3.log.verify("commit");
     })
     .await;
 }

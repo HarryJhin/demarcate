@@ -10,8 +10,12 @@ description = "Transaction abstraction for declarative transactions: propagation
 keywords = ["transaction", "database", "spring", "async", "sqlx"]
 categories = ["database", "asynchronous"]
 
+[features]
+default = ["tokio"]
+tokio = ["dep:tokio"]
+
 [dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

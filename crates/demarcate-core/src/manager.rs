@@ -63,26 +63,6 @@ impl Default for ManagerSettings {
     }
 }
 
-impl<D: TransactionDriver> SuspendedResourcesHolder<D> {
-    pub(crate) fn restore_abandoned(self, driver: &D) {
-        if let Some(suspended_resources) = self.suspended_resources {
-            driver.resume_abandoned(suspended_resources);
-        }
-        if let Some(suspended_synchronizations) = self.suspended_synchronizations {
-            synchronization::set_actual_transaction_active(self.was_active);
-            synchronization::set_current_transaction_isolation_level(self.isolation_level);
-            synchronization::set_current_transaction_read_only(self.read_only);
-            synchronization::set_current_transaction_name(self.name);
-            if synchronization::init_synchronization().is_ok() {
-                for suspended in suspended_synchronizations {
-                    suspended.resume_abandoned();
-                    let _ = synchronization::register_synchronization(suspended);
-                }
-            }
-        }
-    }
-}
-
 pub struct TransactionManager<D: TransactionDriver> {
     driver: Arc<D>,
     settings: ManagerSettings,
@@ -129,10 +109,52 @@ impl<D: TransactionDriver> TransactionManager<D> {
     pub async fn status(&self, definition: Option<&TransactionDefinition>) -> Result<Status<D>, TransactionError> {
         let defaults = TransactionDefinition::default();
         let def = definition.unwrap_or(&defaults);
-        synchronization::check_access()?;
         let transaction = self.driver.transaction(&self.settings)?;
+        let existing = self.driver.is_existing_transaction(&transaction);
+        let frame = if self.changes_context(def, existing) { synchronization::detach() } else { None };
+        let status = self.status_on_context(def, transaction, existing).await?;
+        if frame.is_none()
+            && synchronization::is_context_active()
+            && (status.is_new_transaction() || status.is_new_synchronization() || status.has_suspended_resources())
+        {
+            status.set_completed();
+            return Err(TransactionError::InvalidState(
+                "internal error: a transaction that changes the context was created on a shared context".into(),
+            ));
+        }
+        status.set_frame(frame);
+        Ok(status)
+    }
 
-        if self.driver.is_existing_transaction(&transaction) {
+    fn changes_context(&self, definition: &TransactionDefinition, existing: bool) -> bool {
+        let mode = self.settings.transaction_synchronization;
+        let synchronization_active = synchronization::is_synchronization_active();
+        if existing {
+            match definition.propagation {
+                Propagation::Never => false,
+                Propagation::NotSupported | Propagation::RequiresNew => true,
+                Propagation::Nested if self.settings.nested_transaction_allowed => {
+                    !self.driver.use_savepoint_for_nested_transaction()
+                }
+                Propagation::Nested => false,
+                _ => mode != SynchronizationMode::Never && !synchronization_active,
+            }
+        } else {
+            match definition.propagation {
+                Propagation::Mandatory => false,
+                Propagation::Required | Propagation::RequiresNew | Propagation::Nested => true,
+                _ => mode == SynchronizationMode::Always && !synchronization_active,
+            }
+        }
+    }
+
+    async fn status_on_context(
+        &self,
+        def: &TransactionDefinition,
+        transaction: D::Transaction,
+        existing: bool,
+    ) -> Result<Status<D>, TransactionError> {
+        if existing {
             return self.handle_existing_transaction(def, transaction).await;
         }
 
@@ -682,10 +704,12 @@ impl<D: TransactionDriver> TransactionManager<D> {
         if status.is_new_transaction() {
             self.driver.cleanup_after_completion(status.transaction().expect("transaction present")).await;
         }
-        if let Some(suspended) = status.take_suspended_resources() {
-            self.resume(status.transaction(), Some(suspended)).await?;
-        }
-        Ok(())
+        let resumed = match status.take_suspended_resources() {
+            Some(suspended) => self.resume(status.transaction(), Some(suspended)).await,
+            None => Ok(()),
+        };
+        status.release_frame();
+        resumed
     }
 }
 

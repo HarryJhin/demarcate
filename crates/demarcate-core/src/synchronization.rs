@@ -1,7 +1,9 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use crate::BoxFuture;
 use crate::definition::Isolation;
@@ -25,7 +27,6 @@ pub trait TransactionSynchronization: Send + Sync {
     fn resume(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async { Ok(()) })
     }
-    fn resume_abandoned(&self) {}
     fn flush(&self) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async { Ok(()) })
     }
@@ -95,7 +96,7 @@ impl BoundResource {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct State {
     resources: HashMap<ResourceKey, BoundResource>,
     synchronizations: Option<Vec<Arc<dyn TransactionSynchronization>>>,
@@ -103,48 +104,144 @@ struct State {
     current_transaction_read_only: bool,
     current_transaction_isolation_level: Option<Isolation>,
     actual_transaction_active: bool,
-    scopes: Vec<u64>,
-    poisoned: Vec<u64>,
-    next_scope: u64,
-    polling: Vec<u64>,
-    current: Option<u64>,
 }
 
-tokio::task_local! {
-    static STATE: RefCell<State>;
+type Shared = Arc<Mutex<State>>;
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => panic!(
+            "re-entrant access to the transaction context: a resource holder or a synchronization called \
+             back into demarcate_core::synchronization while the context was being updated"
+        ),
+    }
 }
 
-const NO_CONTEXT: &str = "No transaction context is bound to the current task. Call this inside a \
+#[doc(hidden)]
+pub struct Context {
+    state: Mutex<Shared>,
+    frames: Mutex<Vec<(u64, Shared)>>,
+    next_frame: AtomicU64,
+    attachment: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
+    parent: Option<Arc<Context>>,
+}
+
+impl Context {
+    fn root() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(Arc::default()),
+            frames: Mutex::new(Vec::new()),
+            next_frame: AtomicU64::new(0),
+            attachment: Mutex::new(None),
+            parent: None,
+        })
+    }
+
+    fn child(parent: Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(parent.shared()),
+            frames: Mutex::new(Vec::new()),
+            next_frame: AtomicU64::new(0),
+            attachment: Mutex::new(None),
+            parent: Some(parent),
+        })
+    }
+
+    fn shared(&self) -> Shared {
+        lock(&self.state).clone()
+    }
+
+    fn detach(self: &Arc<Self>) -> Frame {
+        let id = self.next_frame.fetch_add(1, Ordering::SeqCst);
+        let mut state = lock(&self.state);
+        let fork = Arc::new(Mutex::new(lock(&state).clone()));
+        let previous = std::mem::replace(&mut *state, fork);
+        lock(&self.frames).push((id, previous));
+        Frame { context: self.clone(), id }
+    }
+
+    fn reattach(&self, id: u64) {
+        let discarded = {
+            let mut frames = lock(&self.frames);
+            let Some(position) = frames.iter().position(|(frame, _)| *frame == id) else { return };
+            let mut later = frames.split_off(position);
+            let (_, previous) = later.remove(0);
+            let fork = std::mem::replace(&mut *lock(&self.state), previous);
+            (fork, later)
+        };
+        drop(discarded);
+    }
+
+    fn is_top(&self, id: u64) -> bool {
+        lock(&self.frames).last().is_some_and(|(frame, _)| *frame == id)
+    }
+}
+
+pub(crate) struct Frame {
+    context: Arc<Context>,
+    id: u64,
+}
+
+impl Frame {
+    pub(crate) fn is_top(&self) -> bool {
+        self.context.is_top(self.id)
+    }
+}
+
+impl Drop for Frame {
+    fn drop(&mut self) {
+        self.context.reattach(self.id);
+    }
+}
+
+thread_local! {
+    static CURRENT: RefCell<Option<Arc<Context>>> = const { RefCell::new(None) };
+}
+
+fn current() -> Option<Arc<Context>> {
+    CURRENT.try_with(|current| current.borrow().clone()).ok().flatten()
+}
+
+struct Scoped<F> {
+    context: Arc<Context>,
+    future: Pin<Box<F>>,
+}
+
+impl<F: Future> Future for Scoped<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        struct Restore(Option<Arc<Context>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = CURRENT.try_with(|current| *current.borrow_mut() = self.0.take());
+            }
+        }
+        let entered = Some(self.context.clone());
+        let _restore = Restore(CURRENT.try_with(|current| current.replace(entered)).ok().flatten());
+        self.future.as_mut().poll(cx)
+    }
+}
+
+const NO_CONTEXT: &str = "No transaction context is bound to the current future. Call this inside a \
      #[transactional] function or TransactionTemplate::execute, or wrap the future in \
-     demarcate_core::synchronization::scope. A task created with tokio::spawn does not inherit the \
-     context of the task that spawned it; use demarcate_core::synchronization::spawn and open a new \
-     transaction inside it";
-
-fn foreign(state: &State) -> bool {
-    state.polling.last().is_some_and(|innermost| state.current != Some(*innermost))
-}
+     demarcate_core::synchronization::scope. A spawned task does not inherit the context of the task that \
+     spawned it; open a new transaction inside it";
 
 fn read<R>(default: R, f: impl FnOnce(&State) -> R) -> R {
-    STATE
-        .try_with(|state| {
-            let state = state.borrow();
-            if foreign(&state) { None } else { Some(f(&state)) }
-        })
-        .ok()
-        .flatten()
-        .unwrap_or(default)
+    match current() {
+        Some(context) => f(&lock(&context.shared())),
+        None => default,
+    }
 }
 
 fn write<R>(f: impl FnOnce(&mut State) -> Result<R, TransactionError>) -> Result<R, TransactionError> {
-    STATE
-        .try_with(|state| {
-            let mut state = state.borrow_mut();
-            if foreign(&state) {
-                return Err(TransactionError::InvalidState(CONCURRENT.into()));
-            }
-            f(&mut state)
-        })
-        .unwrap_or_else(|_| Err(TransactionError::InvalidState(NO_CONTEXT.into())))
+    match current() {
+        Some(context) => f(&mut lock(&context.shared())),
+        None => Err(TransactionError::InvalidState(NO_CONTEXT.into())),
+    }
 }
 
 fn bind(state: &mut State, key: ResourceKey, value: BoundResource) -> Option<BoundResource> {
@@ -160,111 +257,72 @@ fn unbind(state: &mut State, key: &ResourceKey) -> Option<BoundResource> {
 }
 
 pub fn is_context_active() -> bool {
-    STATE.try_with(|_| ()).is_ok()
+    current().is_some()
 }
 
 pub async fn scope<F: Future>(future: F) -> F::Output {
-    STATE.scope(RefCell::new(State::default()), future).await
-}
-
-pub(crate) const CONCURRENT: &str = "A transactional call is already running on this task and this future runs beside \
-     it (for example in join! or select!). One task has one transaction context, and while that call runs the \
-     context belongs to it, so this future can neither join its caller's transaction nor start one. Await the \
-     two one after another, or run one of them in its own task with demarcate_core::synchronization::spawn";
-
-#[doc(hidden)]
-pub fn check_access() -> Result<(), TransactionError> {
-    let concurrent = STATE.try_with(|state| foreign(&state.borrow())).unwrap_or(false);
-    if concurrent { Err(TransactionError::InvalidState(CONCURRENT.into())) } else { Ok(()) }
+    if is_context_active() { future.await } else { Scoped { context: Context::root(), future: Box::pin(future) }.await }
 }
 
 #[doc(hidden)]
-pub struct BoundaryScope<F> {
-    boundary: Option<u64>,
-    future: std::pin::Pin<Box<F>>,
+pub fn call_scope<F: Future>(future: F) -> impl Future<Output = F::Output> {
+    let context = match current() {
+        Some(parent) => Context::child(parent),
+        None => Context::root(),
+    };
+    Scoped { context, future: Box::pin(future) }
+}
+
+pub(crate) fn detach() -> Option<Frame> {
+    current().map(|context| context.detach())
 }
 
 #[doc(hidden)]
-pub fn boundary_scope<F: Future>(boundary: Option<u64>, future: F) -> BoundaryScope<F> {
-    if let Some(id) = boundary {
-        let _ = STATE.try_with(|state| state.borrow_mut().polling.push(id));
-    }
-    BoundaryScope { boundary, future: Box::pin(future) }
-}
+pub struct CallAttachment(Option<Arc<Context>>);
 
-impl<F: Future> Future for BoundaryScope<F> {
-    type Output = F::Output;
-
-    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        let Some(id) = self.boundary else {
-            return self.future.as_mut().poll(cx);
-        };
-        let previous = STATE.try_with(|state| state.borrow_mut().current.replace(id)).ok().flatten();
-        struct Reset(Option<u64>);
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                let _ = STATE.try_with(|state| state.borrow_mut().current = self.0);
-            }
-        }
-        let _reset = Reset(previous);
-        self.future.as_mut().poll(cx)
-    }
-}
-
-impl<F> Drop for BoundaryScope<F> {
+impl Drop for CallAttachment {
     fn drop(&mut self) {
-        if let Some(id) = self.boundary {
-            let _ = STATE.try_with(|state| state.borrow_mut().polling.retain(|polling| *polling != id));
+        if let Some(context) = &self.0 {
+            let detached = lock(&context.attachment).take();
+            drop(detached);
         }
     }
 }
 
-pub(crate) const OUT_OF_ORDER: &str = "Transaction boundaries on this task completed out of order. Two \
-     transactional calls ran concurrently on one task (for example with join! or select!), so they shared one \
-     task-bound transaction context. The transaction was rolled back. Await transactional calls one after \
-     another, or run each in its own task with demarcate_core::synchronization::spawn";
-
-pub(crate) fn enter_boundary() -> Option<u64> {
-    STATE
-        .try_with(|state| {
-            let mut state = state.borrow_mut();
-            state.next_scope += 1;
-            let id = state.next_scope;
-            state.scopes.push(id);
-            id
-        })
-        .ok()
+#[doc(hidden)]
+pub fn attach_to_call(attachment: Arc<dyn Any + Send + Sync>) -> CallAttachment {
+    let context = current();
+    if let Some(context) = &context {
+        let previous = lock(&context.attachment).replace(attachment);
+        drop(previous);
+    }
+    CallAttachment(context)
 }
 
-pub(crate) fn boundary_in_order(id: Option<u64>) -> bool {
-    let Some(id) = id else { return true };
-    read(true, |state| state.scopes.last() == Some(&id) && !state.poisoned.contains(&id))
-}
-
-pub(crate) fn exit_boundary(id: Option<u64>) {
-    let Some(id) = id else { return };
-    let _ = STATE.try_with(|state| {
-        let mut state = state.borrow_mut();
-        state.poisoned.retain(|poisoned| *poisoned != id);
-        if let Some(position) = state.scopes.iter().position(|scope| *scope == id) {
-            let later: Vec<u64> = state.scopes.drain(position..).skip(1).collect();
-            state.scopes.extend(later.iter().copied());
-            state.poisoned.extend(later);
+#[doc(hidden)]
+pub fn call_attachment() -> Option<Arc<dyn Any + Send + Sync>> {
+    let mut context = current();
+    while let Some(candidate) = context {
+        if let Some(attachment) = lock(&candidate.attachment).clone() {
+            return Some(attachment);
         }
-    });
+        context = candidate.parent.clone();
+    }
+    None
 }
 
+pub(crate) const OUT_OF_ORDER: &str = "Transactions on this context completed out of order. A transaction \
+     obtained from PlatformTransactionManager::transaction was completed while a later one on the same context was \
+     still open. The transaction was rolled back. Complete transactions in the reverse order of their creation, or \
+     use #[transactional] or TransactionTemplate, which give every call its own context";
+
+#[cfg(feature = "tokio")]
 pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    tokio::spawn(scope(future))
-}
-
-#[doc(hidden)]
-pub async fn ensure_scope<F: Future>(future: F) -> F::Output {
-    if is_context_active() { future.await } else { scope(future).await }
+    tokio::spawn(Scoped { context: Context::root(), future: Box::pin(future) })
 }
 
 pub fn resource_keys() -> Vec<ResourceKey> {
@@ -276,21 +334,17 @@ pub fn has_resource(key: &ResourceKey) -> bool {
 }
 
 pub fn resource(key: &ResourceKey) -> Option<BoundResource> {
-    STATE
-        .try_with(|state| {
-            let mut state = state.borrow_mut();
-            if foreign(&state) {
-                return None;
-            }
-            let value = state.resources.get(key).cloned()?;
-            if value.is_void() {
-                state.resources.remove(key);
-                return None;
-            }
-            Some(value)
-        })
-        .ok()
-        .flatten()
+    let context = current()?;
+    let shared = context.shared();
+    let mut state = lock(&shared);
+    let value = state.resources.get(key).cloned()?;
+    if value.is_void() {
+        let removed = state.resources.remove(key);
+        drop(state);
+        drop(removed);
+        return None;
+    }
+    Some(value)
 }
 
 pub fn bind_resource(key: ResourceKey, value: BoundResource) -> Result<(), TransactionError> {
@@ -365,14 +419,13 @@ pub fn synchronizations() -> Result<Vec<Arc<dyn TransactionSynchronization>>, Tr
 }
 
 pub fn clear_synchronization() -> Result<(), TransactionError> {
-    write(|state| {
-        if state.synchronizations.take().is_none() {
-            return Err(TransactionError::InvalidState(
-                "Cannot deactivate transaction synchronization - not active".into(),
-            ));
-        }
-        Ok(())
-    })
+    let cleared = write(|state| {
+        state.synchronizations.take().ok_or_else(|| {
+            TransactionError::InvalidState("Cannot deactivate transaction synchronization - not active".into())
+        })
+    })?;
+    drop(cleared);
+    Ok(())
 }
 
 pub fn set_current_transaction_name(name: Option<String>) {
@@ -421,12 +474,12 @@ pub fn is_actual_transaction_active() -> bool {
 
 pub fn clear() {
     let _ = write(|state| {
-        state.synchronizations = None;
+        let cleared = state.synchronizations.take();
         state.current_transaction_name = None;
         state.current_transaction_read_only = false;
         state.current_transaction_isolation_level = None;
         state.actual_transaction_active = false;
-        Ok(())
+        Ok(cleared)
     });
 }
 
@@ -455,12 +508,6 @@ impl TransactionSynchronization for SynchronizedResource {
                 None => Ok(()),
             })
         })
-    }
-    fn resume_abandoned(&self) {
-        let _ = write(|state| {
-            bind(state, self.key.clone(), self.value.clone());
-            Ok(())
-        });
     }
     fn after_completion(&self, _status: CompletionStatus) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async {

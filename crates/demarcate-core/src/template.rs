@@ -71,18 +71,13 @@ impl TransactionTemplate {
         F: FnOnce(Arc<dyn TransactionStatus>) -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        Box::pin(synchronization::ensure_scope(async {
+        Box::pin(synchronization::call_scope(async {
             let status = self
                 .transaction_manager
                 .transaction(Some(&self.definition))
                 .await
                 .map_err(TemplateError::Transaction)?;
-            let outcome = match CatchUnwind::new(synchronization::boundary_scope(
-                status.boundary(),
-                action(status.clone()),
-            ))
-            .await
-            {
+            let outcome = match CatchUnwind::new(action(status.clone())).await {
                 Ok(outcome) => outcome,
                 Err(panic) => {
                     if let Err(error) = self.transaction_manager.rollback(status.as_ref()).await {

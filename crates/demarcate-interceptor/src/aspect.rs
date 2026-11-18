@@ -1,5 +1,4 @@
 use std::any::{Any, TypeId, type_name};
-use std::cell::RefCell;
 use std::panic::resume_unwind;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,16 +20,11 @@ impl TransactionInfo {
     }
 }
 
-tokio::task_local! {
-    static INFO: RefCell<Vec<Arc<TransactionInfo>>>;
-}
-
 pub fn current_transaction_info() -> Option<Arc<TransactionInfo>> {
-    INFO.try_with(|stack| stack.borrow().last().cloned()).ok().flatten()
+    synchronization::call_attachment().and_then(|attachment| attachment.downcast::<TransactionInfo>().ok())
 }
 
 pub fn current_transaction_status() -> Result<Arc<dyn TransactionStatus>, TransactionError> {
-    demarcate_core::synchronization::check_access()?;
     current_transaction_info().map(|info| info.status.clone()).ok_or_else(|| {
         TransactionError::NoTransaction(
             "No transaction aspect-managed TransactionStatus in scope. current_transaction_status() works only \
@@ -38,14 +32,6 @@ pub fn current_transaction_status() -> Result<Arc<dyn TransactionStatus>, Transa
                 .into(),
         )
     })
-}
-
-struct Restore(Arc<TransactionInfo>);
-
-impl Drop for Restore {
-    fn drop(&mut self) {
-        let _ = INFO.try_with(|stack| stack.borrow_mut().retain(|info| !Arc::ptr_eq(info, &self.0)));
-    }
 }
 
 pub async fn invoke_within_transaction<T, E, Fut>(
@@ -73,10 +59,7 @@ where
 {
     let invocation = Box::pin(invocation);
     let invoked = Box::pin(invoke(manager, attribute, method_identification, invocation));
-    Box::pin(synchronization::ensure_scope(async move {
-        if INFO.try_with(|_| ()).is_ok() { invoked.await } else { INFO.scope(RefCell::new(Vec::new()), invoked).await }
-    }))
-    .await
+    Box::pin(synchronization::call_scope(invoked)).await
 }
 
 async fn invoke<T, E, Fut>(
@@ -96,10 +79,9 @@ where
 
     let status = manager.transaction(Some(&attribute.definition)).await?;
     let info = Arc::new(TransactionInfo { attribute, joinpoint_identification, status: status.clone() });
-    INFO.with(|stack| stack.borrow_mut().push(info.clone()));
-    let restore = Restore(info.clone());
+    let restore = synchronization::attach_to_call(info.clone());
 
-    let outcome = CatchUnwind::new(synchronization::boundary_scope(status.boundary(), invocation)).await;
+    let outcome = CatchUnwind::new(invocation).await;
 
     match outcome {
         Err(panic) => {
