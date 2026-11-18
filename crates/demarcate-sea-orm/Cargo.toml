@@ -1,0 +1,17 @@
+[package]
+name = "demarcate-sea-orm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "SeaORM transaction manager for demarcate: a connection that runs every query in the current transaction"
+keywords = ["transaction", "database", "spring", "async", "sea-orm"]
+categories = ["database", "asynchronous"]
+
+[dependencies]
+demarcate-connection = { path = "../demarcate-connection", version = "0.1.0" }
+demarcate-core = { path = "../demarcate-core", version = "0.1.0", default-features = false }
+async-trait = "0.1.80"
+sea-orm = { version = "2.0.4", default-features = false, features = ["sqlx-dep"] }

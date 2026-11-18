@@ -81,6 +81,10 @@ pub use demarcate_interceptor::{
 pub use demarcate_interceptor::{TransactionalReturn, assert_transactional_return};
 pub use demarcate_macros::transactional;
 
+/// The SeaORM driver and the transaction-aware connection, for PostgreSQL, MySQL, MariaDB and
+/// SQLite.
+#[cfg(feature = "sea-orm")]
+pub use demarcate_sea_orm as sea_orm;
 /// The MySQL and MariaDB driver and the transaction-aware pool, through sqlx.
 #[cfg(feature = "sqlx-mysql")]
 pub use demarcate_sqlx::mysql;
