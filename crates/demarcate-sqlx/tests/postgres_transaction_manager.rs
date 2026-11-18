@@ -427,12 +427,17 @@ async fn propagation_supports_and_requires_new_with_early_access() {
                 f.template(Propagation::RequiresNew)
                     .execute(|inner| async move {
                         assert!(inner.is_new_transaction());
-                        assert_ne!(f.backend_pid().await?, first);
+                        assert!(tsm::is_actual_transaction_active());
+                        let inside = f.backend_pid().await?;
+                        assert_eq!(f.backend_pid().await?, inside);
                         f.insert("inner").await
                     })
                     .await
                     .map_err(|error| TransactionError::Other(error.to_string().into()))?;
-                assert_eq!(f.backend_pid().await?, first);
+                assert!(!tsm::is_actual_transaction_active());
+                assert!(tsm::is_synchronization_active());
+                let after = f.backend_pid().await?;
+                assert_eq!(f.backend_pid().await?, after);
                 Ok::<_, TransactionError>(())
             })
             .await

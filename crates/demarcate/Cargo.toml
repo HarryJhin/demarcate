@@ -13,7 +13,7 @@ categories = ["database", "asynchronous"]
 [features]
 default = []
 sqlx-postgres = ["dep:demarcate-sqlx", "demarcate-sqlx/postgres"]
-sqlx-macros = ["demarcate-sqlx?/macros"]
+sqlx-macros = ["sqlx-postgres", "demarcate-sqlx/macros"]
 
 [dependencies]
 demarcate-core = { path = "../demarcate-core", version = "0.1.0" }
