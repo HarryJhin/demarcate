@@ -6,7 +6,6 @@ members = [
     "crates/demarcate-interceptor",
     "crates/demarcate-macros",
     "crates/demarcate-sqlx",
-    "examples/axum-orders",
 ]
 
 [workspace.package]
@@ -17,6 +16,6 @@ license = "Apache-2.0"
 repository = "https://github.com/HarryJhin/demarcate"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
-tracing = "0.1"
-sqlx = { version = "0.9", default-features = false }
+tokio = { version = "1.38", features = ["rt", "sync", "macros", "time"] }
+tracing = "0.1.37"
+sqlx = { version = "0.9.1", default-features = false }

@@ -71,7 +71,18 @@ demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.1.0", fe
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 ```
 
-The minimum Rust version is 1.94, which sqlx 0.9 requires.
+## Compatibility
+
+| | Supported | Checked by the CI |
+|:--|:--|:--|
+| Rust | 1.94 and later; sqlx 0.9 requires 1.94 | 1.94 and the current stable release |
+| sqlx | 0.9.1 and later 0.9 releases | 0.9.1, and weekly the newest release |
+| tokio | 1.38 and later | 1.38, and weekly the newest release |
+| PostgreSQL | not limited | 18 |
+
+One CI job builds and tests with the lowest version of every direct
+dependency that `Cargo.toml` allows. A weekly job does the same with the
+newest versions.
 
 Register a transaction manager once at startup:
 
