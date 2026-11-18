@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/dtx-core", "crates/dtx-datasource", "crates/dtx-sqlx"]
+members = ["crates/dtx-core", "crates/dtx-sqlx"]
 
 [workspace.package]
 version = "0.0.0"

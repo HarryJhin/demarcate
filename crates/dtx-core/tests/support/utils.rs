@@ -6,8 +6,8 @@ use dtx_core::{
     TransactionError, TransactionSynchronization, synchronization,
 };
 
-use crate::connection::{DataSource, SharedConnection, SqlError, SqlErrorKind, Statement};
-use crate::holder::ConnectionHolder;
+use super::connection::{DataSource, SharedConnection, SqlError, SqlErrorKind, Statement};
+use super::holder::ConnectionHolder;
 
 pub const CONNECTION_SYNCHRONIZATION_ORDER: i32 = 1000;
 
@@ -15,7 +15,7 @@ pub fn data_source_key(data_source: &Arc<dyn DataSource>) -> ResourceKey {
     ResourceKey::of(data_source)
 }
 
-pub(crate) fn bound_holder(data_source: &Arc<dyn DataSource>) -> Option<Arc<ConnectionHolder>> {
+pub fn bound_holder(data_source: &Arc<dyn DataSource>) -> Option<Arc<ConnectionHolder>> {
     synchronization::resource(&data_source_key(data_source)).and_then(|resource| resource.downcast::<ConnectionHolder>())
 }
 
@@ -77,7 +77,7 @@ pub async fn prepare_connection_for_transaction(
     .await
 }
 
-pub(crate) async fn prepare_connection(
+pub async fn prepare_connection(
     connection: &SharedConnection,
     isolation: Isolation,
     set_read_only: bool,

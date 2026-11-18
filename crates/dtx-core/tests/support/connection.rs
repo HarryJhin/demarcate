@@ -64,13 +64,18 @@ pub trait Connection: Send + 'static {
     fn set_savepoint<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, SqlResult<Savepoint>>;
     fn rollback_to_savepoint<'a>(&'a mut self, savepoint: &'a Savepoint) -> BoxFuture<'a, SqlResult<()>>;
     fn release_savepoint<'a>(&'a mut self, savepoint: &'a Savepoint) -> BoxFuture<'a, SqlResult<()>>;
-    fn execute_update<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, SqlResult<u64>>;
+    fn create_statement(&mut self) -> BoxFuture<'_, SqlResult<Box<dyn Statement>>>;
+    fn prepare_statement<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, SqlResult<Box<dyn Statement>>>;
+    fn warnings(&mut self) -> BoxFuture<'_, SqlResult<Vec<String>>>;
+    fn clear_warnings(&mut self) -> BoxFuture<'_, SqlResult<()>>;
     fn close(&mut self) -> BoxFuture<'_, SqlResult<()>>;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 pub trait Statement: Send {
+    fn execute_update<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, SqlResult<u64>>;
     fn set_query_timeout(&mut self, seconds: i32) -> BoxFuture<'_, SqlResult<()>>;
+    fn close(&mut self) -> BoxFuture<'_, SqlResult<()>>;
 }
 
 pub type SharedConnection = Arc<tokio::sync::Mutex<Box<dyn Connection>>>;

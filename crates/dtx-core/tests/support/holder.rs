@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use dtx_core::{ResourceHolder, Savepoint, TransactionError};
 
-use crate::connection::{ConnectionHandle, SharedConnection, SimpleConnectionHandle, SqlError};
+use super::connection::{ConnectionHandle, SharedConnection, SimpleConnectionHandle, SqlError};
 
 pub const SAVEPOINT_NAME_PREFIX: &str = "SAVEPOINT_";
 

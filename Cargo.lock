@@ -179,15 +179,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dtx-datasource"
-version = "0.0.0"
-dependencies = [
- "dtx-core",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dtx-sqlx"
 version = "0.0.0"
 dependencies = [

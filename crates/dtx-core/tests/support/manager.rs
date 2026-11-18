@@ -5,11 +5,11 @@ use dtx_core::{
     TransactionError, TransactionManager, synchronization,
 };
 
-use crate::connection::{DataSource, SharedConnection, SqlError, SqlErrorKind};
-use crate::holder::{ConnectionHolder, SqlOrState};
-use crate::utils;
+use super::connection::{DataSource, SharedConnection, SqlError, SqlErrorKind};
+use super::holder::{ConnectionHolder, SqlOrState};
+use super::utils;
 
-pub use crate::utils::data_source_key;
+pub use super::utils::data_source_key;
 
 #[derive(Default)]
 struct ObjectState {
@@ -128,7 +128,10 @@ impl DataSourceTransactionDriver {
         definition: &TransactionDefinition,
     ) -> Result<(), SqlError> {
         if self.enforce_read_only && definition.read_only {
-            connection.lock().await.execute_update("SET TRANSACTION READ ONLY").await?;
+            let mut statement = connection.lock().await.create_statement().await?;
+            let executed = statement.execute_update("SET TRANSACTION READ ONLY").await;
+            statement.close().await?;
+            executed?;
         }
         Ok(())
     }
