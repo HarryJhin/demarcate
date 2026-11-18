@@ -67,7 +67,7 @@ repository:
 
 ```toml
 [dependencies]
-demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.1.0", features = ["sqlx-postgres"] }
+demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.2.0", features = ["sqlx-postgres"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 ```
 
