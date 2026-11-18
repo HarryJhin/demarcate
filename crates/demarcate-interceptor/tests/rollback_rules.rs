@@ -69,7 +69,7 @@ fn type_rule_does_not_match_error_with_similar_name() {
 }
 
 #[test]
-#[should_panic(expected = "cannot be null or empty")]
+#[should_panic(expected = "must not be empty")]
 fn constructor_preconditions() {
     RollbackRule::rollback_for_name("  ");
 }

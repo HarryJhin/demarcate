@@ -52,7 +52,7 @@ pub trait TransactionExecution: Send + Sync {
     ///
     /// Returns an error when the transaction has already completed.
     fn set_rollback_only(&self) -> Result<(), TransactionError> {
-        Err(TransactionError::InvalidState("setRollbackOnly not supported".into()))
+        Err(TransactionError::InvalidState("This transaction status does not support set_rollback_only".into()))
     }
     /// Returns whether the transaction is marked rollback-only, by this call or by another call that
     /// joined the same transaction.
