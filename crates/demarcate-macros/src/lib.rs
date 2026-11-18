@@ -164,9 +164,17 @@ fn not_async(sig: &Signature) -> TokenStream {
     .into()
 }
 
+fn mentions_future(tokens: TokenStream2) -> bool {
+    tokens.into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(ident) => ident == "Future" || ident == "BoxFuture" || ident == "LocalBoxFuture",
+        proc_macro2::TokenTree::Group(group) => mentions_future(group.stream()),
+        _ => false,
+    })
+}
+
 fn returns_future(sig: &Signature) -> bool {
     match &sig.output {
-        syn::ReturnType::Type(_, ty) => quote!(#ty).to_string().contains("Future"),
+        syn::ReturnType::Type(_, ty) => mentions_future(quote!(#ty)),
         syn::ReturnType::Default => false,
     }
 }

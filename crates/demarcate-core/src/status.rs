@@ -133,6 +133,7 @@ pub struct ManagedTransactionStatus<D: TransactionDriver> {
     completed: AtomicBool,
     savepoint: Mutex<Option<Savepoint>>,
     frame: Mutex<Option<synchronization::Frame>>,
+    nested_owner: Mutex<Option<synchronization::NestedOwner>>,
     rollback_only_when_abandoned: bool,
 }
 
@@ -162,6 +163,7 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
             completed: AtomicBool::new(false),
             savepoint: Mutex::new(None),
             frame: Mutex::new(None),
+            nested_owner: Mutex::new(None),
             rollback_only_when_abandoned,
         }
     }
@@ -191,8 +193,14 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
     }
 
     pub(crate) fn release_frame(&self) {
+        let nested_owner = self.nested_owner.lock().expect("nested owner lock").take();
+        drop(nested_owner);
         let frame = self.frame.lock().expect("frame lock").take();
         drop(frame);
+    }
+
+    pub(crate) fn own_nested_transaction(&self) {
+        *self.nested_owner.lock().expect("nested owner lock") = synchronization::enter_nested();
     }
 
     pub(crate) fn has_suspended_resources(&self) -> bool {

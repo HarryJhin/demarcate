@@ -41,6 +41,7 @@ pub struct ConnectionHolder {
     connection: Arc<tokio::sync::Mutex<Option<Conn>>>,
     synchronized_with_transaction: AtomicBool,
     rollback_only: AtomicBool,
+    rollback_only_beside_nested: AtomicBool,
     transaction_active: AtomicBool,
     deadline: Mutex<Option<Instant>>,
     savepoint_counter: AtomicU32,
@@ -53,6 +54,7 @@ impl ConnectionHolder {
             connection: Arc::new(tokio::sync::Mutex::new(Some(connection))),
             synchronized_with_transaction: AtomicBool::new(false),
             rollback_only: AtomicBool::new(false),
+            rollback_only_beside_nested: AtomicBool::new(false),
             transaction_active: AtomicBool::new(false),
             deadline: Mutex::new(None),
             savepoint_counter: AtomicU32::new(0),
@@ -78,7 +80,7 @@ impl ConnectionHolder {
         self.rollback_only.store(false, Ordering::SeqCst);
     }
     pub fn is_rollback_only(&self) -> bool {
-        self.rollback_only.load(Ordering::SeqCst)
+        self.rollback_only.load(Ordering::SeqCst) || self.rollback_only_beside_nested.load(Ordering::SeqCst)
     }
     pub fn set_timeout(&self, timeout: Duration) {
         *self.deadline.lock().expect("deadline lock") = Some(Instant::now() + timeout);
@@ -118,6 +120,7 @@ impl ConnectionHolder {
     fn clear(&self) {
         self.set_synchronized_with_transaction(false);
         self.reset_rollback_only();
+        self.rollback_only_beside_nested.store(false, Ordering::SeqCst);
         *self.deadline.lock().expect("deadline lock") = None;
         self.set_transaction_active(false);
         self.savepoint_counter.store(0, Ordering::SeqCst);
@@ -206,6 +209,7 @@ impl TransactionalPool {
     }
 
     pub async fn acquire_in_transaction(&self) -> Result<TransactionalConnection, TransactionError> {
+        synchronization::check_access()?;
         if !self.bound_holder().is_some_and(|holder| holder.is_transaction_active()) {
             return Err(TransactionError::NoTransaction(
                 "No transaction is active for this pool on the current task. acquire_in_transaction() must be \
@@ -226,6 +230,7 @@ impl TransactionalPool {
     }
 
     async fn acquire_any(&self) -> Result<TransactionalConnection, TransactionError> {
+        synchronization::check_access()?;
         let synchronized = synchronization::is_synchronization_active();
         if let Some(holder) = self.bound_holder() {
             let mut guard = holder.lock()?;
@@ -246,7 +251,7 @@ impl TransactionalPool {
         }
 
         let connection = self.inner.acquire().await.map_err(cannot_get_connection)?;
-        if !synchronized {
+        if !synchronized || self.bound_holder().is_some() {
             return Ok(TransactionalConnection(Handle::Standalone(connection)));
         }
 
@@ -624,7 +629,11 @@ impl TransactionDriver for PgTransactionDriver {
 
     fn set_rollback_only(&self, transaction: &Self::Transaction) -> Result<(), TransactionError> {
         if let Some(holder) = transaction.holder() {
-            holder.set_rollback_only();
+            if synchronization::is_beside_nested_transaction() {
+                holder.rollback_only_beside_nested.store(true, Ordering::SeqCst);
+            } else {
+                holder.set_rollback_only();
+            }
         }
         Ok(())
     }
@@ -643,7 +652,9 @@ impl TransactionDriver for PgTransactionDriver {
     }
 
     fn abandon(&self, transaction: &Self::Transaction) {
-        if let Some(holder) = transaction.holder() {
+        if transaction.is_new_connection_holder()
+            && let Some(holder) = transaction.holder()
+        {
             holder.abandon();
         }
     }

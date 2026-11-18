@@ -104,6 +104,8 @@ struct State {
     current_transaction_read_only: bool,
     current_transaction_isolation_level: Option<Isolation>,
     actual_transaction_active: bool,
+    nested_owners: Vec<u64>,
+    closed: bool,
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -121,6 +123,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[doc(hidden)]
 pub struct Context {
+    id: u64,
     state: Mutex<Shared>,
     frames: Mutex<Vec<(u64, Shared)>>,
     next_frame: AtomicU64,
@@ -131,6 +134,7 @@ pub struct Context {
 impl Context {
     fn root() -> Arc<Self> {
         Arc::new(Self {
+            id: NEXT_CONTEXT.fetch_add(1, Ordering::Relaxed),
             state: Mutex::new(Arc::default()),
             frames: Mutex::new(Vec::new()),
             next_frame: AtomicU64::new(0),
@@ -141,6 +145,7 @@ impl Context {
 
     fn child(parent: Arc<Self>) -> Arc<Self> {
         Arc::new(Self {
+            id: NEXT_CONTEXT.fetch_add(1, Ordering::Relaxed),
             state: Mutex::new(parent.shared()),
             frames: Mutex::new(Vec::new()),
             next_frame: AtomicU64::new(0),
@@ -156,7 +161,9 @@ impl Context {
     fn detach(self: &Arc<Self>) -> Frame {
         let id = self.next_frame.fetch_add(1, Ordering::SeqCst);
         let mut state = lock(&self.state);
-        let fork = Arc::new(Mutex::new(lock(&state).clone()));
+        let mut copy = lock(&state).clone();
+        copy.nested_owners.clear();
+        let fork = Arc::new(Mutex::new(copy));
         let previous = std::mem::replace(&mut *state, fork);
         lock(&self.frames).push((id, previous));
         Frame { context: self.clone(), id }
@@ -171,7 +178,36 @@ impl Context {
             let fork = std::mem::replace(&mut *lock(&self.state), previous);
             (fork, later)
         };
+        let leftovers = discarded.0.try_lock().ok().map(|mut state| {
+            state.closed = true;
+            (state.synchronizations.take(), std::mem::take(&mut state.resources))
+        });
+        drop(leftovers);
         drop(discarded);
+    }
+
+    fn abandon(&self) {
+        let open = self.frames.try_lock().map(|frames| !frames.is_empty()).unwrap_or(false);
+        if !open {
+            return;
+        }
+        let Ok(shared) = self.state.try_lock().map(|state| state.clone()) else { return };
+        let leftovers = shared
+            .try_lock()
+            .ok()
+            .map(|mut state| (state.synchronizations.take(), std::mem::take(&mut state.resources)));
+        drop(leftovers);
+    }
+
+    fn is_within(&self, owner: u64) -> bool {
+        let mut context = Some(self);
+        while let Some(candidate) = context {
+            if candidate.id == owner {
+                return true;
+            }
+            context = candidate.parent.as_deref();
+        }
+        false
     }
 
     fn is_top(&self, id: u64) -> bool {
@@ -193,6 +229,71 @@ impl Frame {
 impl Drop for Frame {
     fn drop(&mut self) {
         self.context.reattach(self.id);
+    }
+}
+
+static NEXT_CONTEXT: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) struct NestedOwner {
+    shared: Shared,
+    owner: u64,
+}
+
+impl Drop for NestedOwner {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.shared.try_lock()
+            && let Some(position) = state.nested_owners.iter().rposition(|owner| *owner == self.owner)
+        {
+            state.nested_owners.remove(position);
+        }
+    }
+}
+
+pub(crate) fn enter_nested() -> Option<NestedOwner> {
+    let context = current()?;
+    let shared = context.shared();
+    lock(&shared).nested_owners.push(context.id);
+    Some(NestedOwner { shared, owner: context.id })
+}
+
+pub fn is_beside_nested_transaction() -> bool {
+    let Some(context) = current() else { return false };
+    let owner = lock(&context.shared()).nested_owners.last().copied();
+    owner.is_some_and(|owner| !context.is_within(owner))
+}
+
+const CLOSED: &str = "The transaction that this future joined has completed. A transactional call that joins \
+     the transaction of its caller must finish before the caller does; a future that is polled after the caller \
+     returned cannot use that transaction. Await the call inside the caller, or give it its own transaction with \
+     propagation = RequiresNew";
+
+const BESIDE_NESTED: &str = "A nested transaction (savepoint) is running on the connection of this transaction \
+     and this future runs beside it (for example in join! or select!). Until the nested call completes, work on \
+     the connection belongs to its savepoint. Await the nested call first, or run this work inside it";
+
+#[doc(hidden)]
+pub fn check_open() -> Result<(), TransactionError> {
+    match current() {
+        Some(context) if lock(&context.shared()).closed => Err(TransactionError::InvalidState(CLOSED.into())),
+        _ => Ok(()),
+    }
+}
+
+#[doc(hidden)]
+pub fn check_access() -> Result<(), TransactionError> {
+    let Some(context) = current() else { return Ok(()) };
+    if lock(&context.shared()).closed {
+        return Err(TransactionError::InvalidState(CLOSED.into()));
+    }
+    if is_beside_nested_transaction() {
+        return Err(TransactionError::InvalidState(BESIDE_NESTED.into()));
+    }
+    Ok(())
+}
+
+impl<F> Drop for Scoped<F> {
+    fn drop(&mut self) {
+        self.context.abandon();
     }
 }
 
@@ -231,29 +332,37 @@ const NO_CONTEXT: &str = "No transaction context is bound to the current future.
      spawned it; open a new transaction inside it";
 
 fn read<R>(default: R, f: impl FnOnce(&State) -> R) -> R {
-    match current() {
-        Some(context) => f(&lock(&context.shared())),
-        None => default,
-    }
+    let Some(context) = current() else { return default };
+    let shared = context.shared();
+    let state = lock(&shared);
+    if state.closed { default } else { f(&state) }
 }
 
 fn write<R>(f: impl FnOnce(&mut State) -> Result<R, TransactionError>) -> Result<R, TransactionError> {
-    match current() {
-        Some(context) => f(&mut lock(&context.shared())),
-        None => Err(TransactionError::InvalidState(NO_CONTEXT.into())),
+    let Some(context) = current() else {
+        return Err(TransactionError::InvalidState(NO_CONTEXT.into()));
+    };
+    let shared = context.shared();
+    let mut state = lock(&shared);
+    if state.closed {
+        return Err(TransactionError::InvalidState(CLOSED.into()));
     }
+    f(&mut state)
 }
 
-fn bind(state: &mut State, key: ResourceKey, value: BoundResource) -> Option<BoundResource> {
-    if let Some(existing) = state.resources.get(&key).filter(|existing| !existing.is_void()) {
-        return Some(existing.clone());
+fn bind(key: &ResourceKey, value: BoundResource) -> Result<Option<BoundResource>, TransactionError> {
+    let existing = write(|state| Ok(state.resources.get(key).cloned()))?;
+    if let Some(existing) = existing.filter(|existing| !existing.is_void()) {
+        return Ok(Some(existing));
     }
-    state.resources.insert(key, value);
-    None
+    let replaced = write(|state| Ok(state.resources.insert(key.clone(), value)))?;
+    drop(replaced);
+    Ok(None)
 }
 
-fn unbind(state: &mut State, key: &ResourceKey) -> Option<BoundResource> {
-    state.resources.remove(key).filter(|value| !value.is_void())
+fn unbind(key: &ResourceKey) -> Result<Option<BoundResource>, TransactionError> {
+    let removed = write(|state| Ok(state.resources.remove(key)))?;
+    Ok(removed.filter(|value| !value.is_void()))
 }
 
 pub fn is_context_active() -> bool {
@@ -334,13 +443,9 @@ pub fn has_resource(key: &ResourceKey) -> bool {
 }
 
 pub fn resource(key: &ResourceKey) -> Option<BoundResource> {
-    let context = current()?;
-    let shared = context.shared();
-    let mut state = lock(&shared);
-    let value = state.resources.get(key).cloned()?;
+    let value = read(None, |state| state.resources.get(key).cloned())?;
     if value.is_void() {
-        let removed = state.resources.remove(key);
-        drop(state);
+        let removed = write(|state| Ok(state.resources.remove(key)));
         drop(removed);
         return None;
     }
@@ -348,34 +453,26 @@ pub fn resource(key: &ResourceKey) -> Option<BoundResource> {
 }
 
 pub fn bind_resource(key: ResourceKey, value: BoundResource) -> Result<(), TransactionError> {
-    write(|state| match bind(state, key.clone(), value) {
+    match bind(&key, value)? {
         Some(_) => Err(TransactionError::InvalidState(format!("Already value for key [{key:?}] bound to task"))),
         None => Ok(()),
-    })
+    }
 }
 
 pub fn bind_synchronized_resource(key: ResourceKey, value: BoundResource) -> Result<(), TransactionError> {
-    write(|state| {
-        if state.synchronizations.is_none() {
-            return Err(TransactionError::InvalidState("Transaction synchronization is not active".into()));
-        }
-        let old_value = bind(state, key.clone(), value.clone());
-        let synchronization: Arc<dyn TransactionSynchronization> =
-            Arc::new(SynchronizedResource { key, value, old_value });
-        state.synchronizations.as_mut().expect("checked above").push(synchronization);
-        Ok(())
-    })
+    if !is_synchronization_active() {
+        return Err(TransactionError::InvalidState("Transaction synchronization is not active".into()));
+    }
+    let old_value = bind(&key, value.clone())?;
+    register_synchronization(Arc::new(SynchronizedResource { key, value, old_value }))
 }
 
 pub fn unbind_resource(key: &ResourceKey) -> Result<BoundResource, TransactionError> {
-    write(|state| {
-        unbind(state, key)
-            .ok_or_else(|| TransactionError::InvalidState(format!("No value for key [{key:?}] bound to task")))
-    })
+    unbind(key)?.ok_or_else(|| TransactionError::InvalidState(format!("No value for key [{key:?}] bound to task")))
 }
 
 pub fn unbind_resource_if_possible(key: &ResourceKey) -> Option<BoundResource> {
-    write(|state| Ok(unbind(state, key))).ok().flatten()
+    unbind(key).ok().flatten()
 }
 
 pub fn is_synchronization_active() -> bool {
@@ -408,14 +505,14 @@ pub fn register_synchronization(synchronization: Arc<dyn TransactionSynchronizat
 }
 
 pub fn synchronizations() -> Result<Vec<Arc<dyn TransactionSynchronization>>, TransactionError> {
-    write(|state| {
-        let mut synchronizations = state
+    let mut synchronizations = write(|state| {
+        state
             .synchronizations
             .clone()
-            .ok_or_else(|| TransactionError::InvalidState("Transaction synchronization is not active".into()))?;
-        synchronizations.sort_by_key(|synchronization| synchronization.order());
-        Ok(synchronizations)
-    })
+            .ok_or_else(|| TransactionError::InvalidState("Transaction synchronization is not active".into()))
+    })?;
+    synchronizations.sort_by_key(|synchronization| synchronization.order());
+    Ok(synchronizations)
 }
 
 pub fn clear_synchronization() -> Result<(), TransactionError> {
@@ -491,33 +588,25 @@ struct SynchronizedResource {
 
 impl TransactionSynchronization for SynchronizedResource {
     fn suspend(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
-        Box::pin(async {
-            write(|state| {
-                unbind(state, &self.key);
-                Ok(())
-            })
-        })
+        Box::pin(async { unbind(&self.key).map(drop) })
     }
     fn resume(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async {
-            write(|state| match bind(state, self.key.clone(), self.value.clone()) {
+            match bind(&self.key, self.value.clone())? {
                 Some(_) => Err(TransactionError::InvalidState(format!(
                     "Unexpected value for key [{:?}] bound on resume",
                     self.key
                 ))),
                 None => Ok(()),
-            })
+            }
         })
     }
     fn after_completion(&self, _status: CompletionStatus) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async {
-            write(|state| {
-                unbind(state, &self.key);
-                if let Some(old_value) = &self.old_value {
-                    bind(state, self.key.clone(), old_value.clone());
-                }
-                Ok(())
-            })?;
+            unbind(&self.key)?;
+            if let Some(old_value) = &self.old_value {
+                bind(&self.key, old_value.clone())?;
+            }
             Ok(())
         })
     }

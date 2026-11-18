@@ -233,6 +233,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
                         status.set_completed();
                         return Err(error);
                     }
+                    status.own_nested_transaction();
                     self.notify(|listener| listener.after_begin(status.as_ref(), None));
                     return Ok(status);
                 }
@@ -585,7 +586,12 @@ impl<D: TransactionDriver> TransactionManager<D> {
             if status.has_savepoint() {
                 self.notify(|listener| listener.before_rollback(status));
                 rollback_listener_invoked = true;
-                status.rollback_to_held_savepoint().await?;
+                if let Err(error) = status.rollback_to_held_savepoint().await {
+                    if let Some(transaction) = status.transaction() {
+                        self.driver.set_rollback_only(transaction)?;
+                    }
+                    return Err(error);
+                }
             } else if status.is_new_transaction() {
                 self.notify(|listener| listener.before_rollback(status));
                 rollback_listener_invoked = true;
