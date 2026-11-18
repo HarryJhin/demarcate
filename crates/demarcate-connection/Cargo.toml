@@ -1,0 +1,15 @@
+[package]
+name = "demarcate-connection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "Connection-bound transaction driver for demarcate: one implementation of the transaction logic for every connection library"
+keywords = ["transaction", "database", "spring", "async"]
+categories = ["database", "asynchronous"]
+
+[dependencies]
+demarcate-core = { path = "../demarcate-core", version = "0.1.0", default-features = false }
+tracing = { workspace = true }

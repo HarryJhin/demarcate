@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/demarcate",
+    "crates/demarcate-connection",
     "crates/demarcate-core",
     "crates/demarcate-interceptor",
     "crates/demarcate-macros",

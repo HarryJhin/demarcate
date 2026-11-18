@@ -172,6 +172,7 @@ name = "demarcate"
 version = "0.1.0"
 dependencies = [
  "demarcate",
+ "demarcate-connection",
  "demarcate-core",
  "demarcate-interceptor",
  "demarcate-macros",
@@ -179,6 +180,14 @@ dependencies = [
  "futures-util",
  "sqlx",
  "tokio",
+]
+
+[[package]]
+name = "demarcate-connection"
+version = "0.1.0"
+dependencies = [
+ "demarcate-core",
+ "tracing",
 ]
 
 [[package]]
@@ -212,12 +221,12 @@ name = "demarcate-sqlx"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "demarcate-connection",
  "demarcate-core",
  "futures-core",
  "futures-util",
  "sqlx",
  "tokio",
- "tracing",
 ]
 
 [[package]]

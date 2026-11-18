@@ -63,10 +63,14 @@
 //! - [`TransactionTemplate`] to set a transaction boundary in code.
 //! - [`on_transaction`] and [`TransactionSynchronization`] to run code at a phase of the
 //!   transaction.
-//! - [`TransactionDriver`] to support another database library.
+//! - [`connection::ConnectionBackend`] to support another connection library, and
+//!   [`TransactionDriver`] for a resource that is not a database connection.
 
 #![warn(missing_docs)]
 
+/// The transaction driver for libraries that run a transaction on one database connection.
+/// Implement its `ConnectionBackend` to support another connection library.
+pub use demarcate_connection as connection;
 pub use demarcate_core::*;
 pub use demarcate_interceptor::{
     FunctionRollbackEvent, RollbackRule, TransactionAttribute, TransactionInfo, TransactionManagerRegistry,

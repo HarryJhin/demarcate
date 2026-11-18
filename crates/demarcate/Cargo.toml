@@ -15,6 +15,7 @@ default = []
 sqlx-postgres = ["dep:demarcate-sqlx", "demarcate-sqlx/postgres"]
 
 [dependencies]
+demarcate-connection = { path = "../demarcate-connection", version = "0.1.0" }
 demarcate-core = { path = "../demarcate-core", version = "0.1.0" }
 demarcate-interceptor = { path = "../demarcate-interceptor", version = "0.1.0" }
 demarcate-macros = { path = "../demarcate-macros", version = "0.1.0" }

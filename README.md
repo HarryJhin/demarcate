@@ -226,12 +226,15 @@ loud:
 |:--|:--|
 | `demarcate` | entry crate, re-exports the others |
 | `demarcate-core` | definition, status, synchronization, transaction manager core, template; no async runtime required |
+| `demarcate-connection` | the transaction driver for connection libraries: connection holder, savepoints, the `ConnectionBackend` trait |
 | `demarcate-interceptor` | transaction attribute, rollback rules, invocation flow, registry |
 | `demarcate-macros` | `#[transactional]` |
 | `demarcate-sqlx` | sqlx driver for PostgreSQL, `TransactionalPool` |
 
-A driver for another database library implements `TransactionDriver`
-from `demarcate-core`.
+A driver for another connection library implements `ConnectionBackend`
+from `demarcate-connection`: how to obtain a connection, begin, commit,
+roll back and run a savepoint statement. A resource that is not a database
+connection implements `TransactionDriver` from `demarcate-core`.
 
 ## Tests
 
