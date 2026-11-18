@@ -14,6 +14,7 @@ changelog_update = false
 name = "demarcate"
 git_tag_enable = true
 git_release_enable = true
+git_release_name = "v{{ version }}"
 changelog_update = true
 changelog_path = "./CHANGELOG.md"
 changelog_include = ["demarcate-core", "demarcate-interceptor", "demarcate-macros", "demarcate-sqlx"]
