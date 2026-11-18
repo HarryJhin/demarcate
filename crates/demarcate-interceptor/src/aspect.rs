@@ -8,22 +8,39 @@ use demarcate_core::{CatchUnwind, PlatformTransactionManager, TransactionError, 
 use crate::attribute::TransactionAttribute;
 use crate::registry::{MethodRollbackEvent, registry};
 
+/// The transaction of the `#[transactional]` function that is running: its settings, its name
+/// and its status.
 pub struct TransactionInfo {
+    /// The settings of the function.
     pub attribute: TransactionAttribute,
+    /// The path of the function, or its descriptor when one is set.
     pub joinpoint_identification: String,
+    /// The status of the transaction.
     pub status: Arc<dyn TransactionStatus>,
 }
 
 impl TransactionInfo {
+    /// Returns whether the function runs in an actual transaction.
     pub fn has_transaction(&self) -> bool {
         self.status.has_transaction()
     }
 }
 
+/// Returns the [`TransactionInfo`] of the innermost `#[transactional]` function that the calling
+/// future runs in, or `None` outside of one.
 pub fn current_transaction_info() -> Option<Arc<TransactionInfo>> {
     synchronization::call_attachment().and_then(|attachment| attachment.downcast::<TransactionInfo>().ok())
 }
 
+/// Returns the status of the innermost `#[transactional]` function that the calling future runs
+/// in.
+///
+/// Use it to mark the transaction rollback-only without returning an error:
+/// `current_transaction_status()?.set_rollback_only()?`.
+///
+/// # Errors
+///
+/// Returns [`TransactionError::NoTransaction`] outside of a `#[transactional]` function.
 pub fn current_transaction_status() -> Result<Arc<dyn TransactionStatus>, TransactionError> {
     current_transaction_info().map(|info| info.status.clone()).ok_or_else(|| {
         TransactionError::NoTransaction(
@@ -34,6 +51,21 @@ pub fn current_transaction_status() -> Result<Arc<dyn TransactionStatus>, Transa
     })
 }
 
+/// Runs the future in a transaction as the attribute says, with the manager that the attribute
+/// names in the global [`registry`](crate::registry).
+///
+/// This is what `#[transactional]` expands to. `method_identification` is the path of the
+/// function; it becomes the name of the transaction.
+///
+/// The transaction commits when the future returns `Ok`. When it returns `Err`, the rollback
+/// rules of the attribute decide between rollback and commit, and the error is returned. A panic
+/// rolls back and continues to unwind.
+///
+/// # Errors
+///
+/// Returns the error of the future, or a [`TransactionError`] converted into `E` when the
+/// transaction could not be started, committed or rolled back. An error of the completion
+/// replaces the error of the future, which is logged.
 pub async fn invoke_within_transaction<T, E, Fut>(
     attribute: TransactionAttribute,
     method_identification: &str,
@@ -47,6 +79,9 @@ where
     invoke_with_manager(manager, attribute, method_identification, invocation).await
 }
 
+/// Runs the future in a transaction with the given manager.
+///
+/// See [`invoke_within_transaction`].
 pub async fn invoke_with_manager<T, E, Fut>(
     manager: Arc<dyn PlatformTransactionManager>,
     attribute: TransactionAttribute,

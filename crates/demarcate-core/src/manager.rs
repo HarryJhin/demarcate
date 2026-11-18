@@ -10,25 +10,73 @@ use crate::listener::TransactionExecutionListener;
 use crate::status::{ManagedTransactionStatus, TransactionExecution, TransactionStatus};
 use crate::synchronization::{self, CompletionStatus, TransactionSynchronization};
 
+/// When a [`TransactionManager`] opens a synchronization scope, in which
+/// [`TransactionSynchronization`] callbacks can be registered.
+///
+/// The default is [`SynchronizationMode::Always`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SynchronizationMode {
+    /// For every call, also one that runs without a transaction.
     #[default]
     Always,
+    /// Only for a call that runs in an actual transaction.
     OnActualTransaction,
+    /// Never. Synchronization callbacks cannot be registered.
     Never,
 }
 
+/// The central interface of the transaction infrastructure: begin, commit and roll back.
+///
+/// Application code rarely calls this directly. Declare transactions with `#[transactional]`, or
+/// run a closure with [`TransactionTemplate`](crate::TransactionTemplate); both call a manager and
+/// give every call its own transaction context.
+///
+/// Direct calls change the context of the calling future in place. Use them from one future at a
+/// time, inside [`synchronization::scope`], and complete transactions in the reverse order of
+/// their creation.
 pub trait PlatformTransactionManager: Send + Sync {
+    /// Returns the status of a transaction for the given definition: an existing transaction that
+    /// the call joins, or a new one, according to the propagation mode.
+    ///
+    /// `None` uses the default definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the propagation mode does not fit the current state, for example
+    /// [`Propagation::Mandatory`] without a transaction, or when the transaction cannot be started.
     fn transaction<'a>(
         &'a self,
         definition: Option<&'a TransactionDefinition>,
     ) -> BoxFuture<'a, Result<Arc<dyn TransactionStatus>, TransactionError>>;
 
+    /// Completes the transaction of the given status.
+    ///
+    /// When the status is marked rollback-only, the transaction is rolled back instead. When the
+    /// call only joined the transaction, nothing is committed here; the call that started the
+    /// transaction commits it. When the call suspended a transaction, that transaction resumes.
+    ///
+    /// After this returns, with or without an error, the status is completed and must not be passed
+    /// to `commit` or `rollback` again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactionError::UnexpectedRollback`] when the transaction was rolled back because
+    /// it was marked rollback-only by a call that joined it, and
+    /// [`TransactionError::System`] when the commit failed.
     fn commit<'a>(&'a self, status: &'a dyn TransactionStatus) -> BoxFuture<'a, Result<(), TransactionError>>;
 
+    /// Rolls back the transaction of the given status.
+    ///
+    /// When the call only joined the transaction, the transaction is marked rollback-only and the
+    /// call that started it rolls it back. When the call suspended a transaction, that transaction
+    /// resumes.
+    ///
+    /// Do not call this after `commit` returned an error; the transaction is already completed.
     fn rollback<'a>(&'a self, status: &'a dyn TransactionStatus) -> BoxFuture<'a, Result<(), TransactionError>>;
 }
 
+/// The resources and synchronizations of a suspended transaction, kept in the status of the call
+/// that suspended it.
 pub struct SuspendedResourcesHolder<D: TransactionDriver> {
     suspended_resources: Option<D::Suspended>,
     suspended_synchronizations: Option<Vec<Arc<dyn TransactionSynchronization>>>,
@@ -38,14 +86,35 @@ pub struct SuspendedResourcesHolder<D: TransactionDriver> {
     was_active: bool,
 }
 
+/// The settings of a [`TransactionManager`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerSettings {
+    /// When the manager opens a synchronization scope. The default is
+    /// [`SynchronizationMode::Always`].
     pub transaction_synchronization: SynchronizationMode,
+    /// The timeout of a transaction whose definition has none. The default is `None`: no timeout.
     pub default_timeout: Option<Duration>,
+    /// Whether [`Propagation::Nested`] is allowed. The default is `false`.
     pub nested_transaction_allowed: bool,
+    /// Whether a call that joins a transaction fails when its definition asks for another isolation
+    /// level, or for a read-write transaction while the existing one is read-only.
+    ///
+    /// The default is `false`: the settings of the joining call are ignored.
     pub validate_existing_transaction: bool,
+    /// Whether a call that joined a transaction and fails marks the whole transaction rollback-only.
+    ///
+    /// The default is `true`. With `false`, the call that started the transaction decides, and can
+    /// commit after a joined call failed.
     pub global_rollback_on_participation_failure: bool,
+    /// Whether a call that joined a transaction gets
+    /// [`TransactionError::UnexpectedRollback`] at its own end when the transaction is marked
+    /// rollback-only, instead of only the call that started the transaction.
+    ///
+    /// The default is `false`.
     pub fail_early_on_global_rollback_only: bool,
+    /// Whether the manager calls `rollback` on the driver when the commit failed.
+    ///
+    /// The default is `false`: the transaction is assumed to be completed by the failed commit.
     pub rollback_on_commit_failure: bool,
 }
 
@@ -63,6 +132,13 @@ impl Default for ManagerSettings {
     }
 }
 
+/// A transaction manager that implements the propagation rules on top of a [`TransactionDriver`].
+///
+/// It decides from the definition and the current state whether to join, start, suspend or nest
+/// a transaction, runs the completion sequence, and triggers the
+/// [`TransactionSynchronization`] and
+/// [`TransactionExecutionListener`] callbacks. The driver supplies the steps that depend on the
+/// resource.
 pub struct TransactionManager<D: TransactionDriver> {
     driver: Arc<D>,
     settings: ManagerSettings,
@@ -72,30 +148,40 @@ pub struct TransactionManager<D: TransactionDriver> {
 type Status<D> = Arc<ManagedTransactionStatus<D>>;
 
 impl<D: TransactionDriver> TransactionManager<D> {
+    /// Creates a manager with the default settings.
     pub fn new(driver: D) -> Self {
         Self::with_settings(driver, ManagerSettings::default())
     }
 
+    /// Creates a manager with the given settings.
     pub fn with_settings(driver: D, settings: ManagerSettings) -> Self {
         Self { driver: Arc::new(driver), settings, listeners: Vec::new() }
     }
 
+    /// Returns the driver.
     pub fn driver(&self) -> &Arc<D> {
         &self.driver
     }
+    /// Returns the settings.
     pub fn settings(&self) -> &ManagerSettings {
         &self.settings
     }
+    /// Returns the settings for modification.
     pub fn settings_mut(&mut self) -> &mut ManagerSettings {
         &mut self.settings
     }
+    /// Registers a listener for the begin, commit and rollback steps of every transaction of this
+    /// manager.
     pub fn add_listener(&mut self, listener: Arc<dyn TransactionExecutionListener>) {
         self.listeners.push(listener);
     }
+    /// Returns the registered listeners.
     pub fn listeners(&self) -> &[Arc<dyn TransactionExecutionListener>] {
         &self.listeners
     }
 
+    /// Returns the timeout that applies to the given definition: its own, or the default of this
+    /// manager.
     pub fn determine_timeout(&self, definition: &TransactionDefinition) -> Option<Duration> {
         definition.timeout.or(self.settings.default_timeout)
     }
@@ -106,6 +192,9 @@ impl<D: TransactionDriver> TransactionManager<D> {
         }
     }
 
+    /// Returns the status of a transaction for the given definition, with the concrete status type.
+    ///
+    /// See [`PlatformTransactionManager::transaction`].
     pub async fn status(&self, definition: Option<&TransactionDefinition>) -> Result<Status<D>, TransactionError> {
         let defaults = TransactionDefinition::default();
         let def = definition.unwrap_or(&defaults);
@@ -453,6 +542,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
         })
     }
 
+    /// Completes the transaction of the given status. See [`PlatformTransactionManager::commit`].
     pub async fn commit_status(&self, status: &dyn TransactionStatus) -> Result<(), TransactionError> {
         if status.is_completed() {
             return Err(TransactionError::InvalidTransactionState(
@@ -474,6 +564,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
         self.process_commit(status).await
     }
 
+    /// Rolls back the transaction of the given status. See [`PlatformTransactionManager::rollback`].
     pub async fn rollback_status(&self, status: &dyn TransactionStatus) -> Result<(), TransactionError> {
         if status.is_completed() {
             return Err(TransactionError::InvalidTransactionState(

@@ -8,53 +8,115 @@ use crate::error::TransactionError;
 use crate::manager::SuspendedResourcesHolder;
 use crate::synchronization;
 
+/// An opaque handle to a savepoint, created and understood by one driver.
 pub type Savepoint = Arc<dyn Any + Send + Sync>;
 
+/// The state of one transactional call: whether it runs in a transaction, whether it started
+/// that transaction, and whether the transaction must roll back.
+///
+/// This is the read side of [`TransactionStatus`], and the view that a
+/// [`TransactionExecutionListener`](crate::TransactionExecutionListener) receives.
 pub trait TransactionExecution: Send + Sync {
+    /// Returns the name of the transaction, or an empty string when it has none.
     fn transaction_name(&self) -> String {
         String::new()
     }
+    /// Returns whether the call runs in an actual transaction.
+    ///
+    /// This is `false` for a call that runs without a transaction, for example with
+    /// [`Propagation::Supports`](crate::Propagation::Supports) and no caller transaction.
     fn has_transaction(&self) -> bool {
         true
     }
+    /// Returns whether the call started the transaction, as opposed to joining the transaction of its
+    /// caller.
+    ///
+    /// Only the call that started a transaction commits or rolls it back.
     fn is_new_transaction(&self) -> bool {
         true
     }
+    /// Returns whether the call runs in a nested transaction.
     fn is_nested(&self) -> bool {
         false
     }
+    /// Returns whether the transaction was defined as read-only.
     fn is_read_only(&self) -> bool {
         false
     }
+    /// Marks the transaction so that its only possible outcome is a rollback.
+    ///
+    /// Use this to roll back without returning an error. The function then returns normally and the
+    /// transaction is rolled back when it would have been committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction has already completed.
     fn set_rollback_only(&self) -> Result<(), TransactionError> {
         Err(TransactionError::InvalidState("setRollbackOnly not supported".into()))
     }
+    /// Returns whether the transaction is marked rollback-only, by this call or by another call that
+    /// joined the same transaction.
     fn is_rollback_only(&self) -> bool {
         false
     }
+    /// Returns whether the transaction was committed, rolled back, or abandoned by a cancelled call.
     fn is_completed(&self) -> bool {
         false
     }
 }
 
+/// Programmatic control of savepoints in the current transaction.
+///
+/// A savepoint allows a part of a transaction to be rolled back. Prefer
+/// [`Propagation::Nested`](crate::Propagation::Nested), which manages the savepoint for the
+/// duration of a call.
+///
+/// Use these methods from one future at a time, and release or roll back a savepoint in the
+/// function that created it.
 pub trait SavepointManager: Send + Sync {
+    /// Creates a savepoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction does not support savepoints or is marked rollback-only.
     fn create_savepoint(&self) -> BoxFuture<'_, Result<Savepoint, TransactionError>>;
+    /// Rolls the transaction back to the given savepoint.
+    ///
+    /// The savepoint is not released by this; call
+    /// [`release_savepoint`](SavepointManager::release_savepoint) afterwards.
     fn rollback_to_savepoint<'a>(&'a self, savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>>;
+    /// Releases the given savepoint. The work since the savepoint stays part of the transaction.
     fn release_savepoint<'a>(&'a self, savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>>;
 }
 
+/// The handle to one transactional call.
+///
+/// A status is returned by
+/// [`PlatformTransactionManager::transaction`](crate::PlatformTransactionManager::transaction)
+/// and passed back to `commit` or `rollback`. Inside a `#[transactional]` function or a
+/// [`TransactionTemplate`](crate::TransactionTemplate) action it is available for
+/// [`set_rollback_only`](TransactionExecution::set_rollback_only) and for savepoints.
 pub trait TransactionStatus: TransactionExecution + SavepointManager + Any {
+    /// Returns whether the call holds a savepoint, that is whether it runs as a nested transaction on
+    /// a savepoint.
     fn has_savepoint(&self) -> bool {
         false
     }
+    /// Flushes pending changes of the underlying session to the database, if the driver has such a
+    /// session.
     fn flush(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async { Ok(()) })
     }
     #[doc(hidden)]
     fn abandon(&self) {}
+    /// Returns the status as [`Any`], so that a transaction manager can recognize its own statuses.
     fn as_any(&self) -> &dyn Any;
 }
 
+/// A [`TransactionStatus`] that is not backed by a transaction manager.
+///
+/// It records the rollback-only flag and the completed flag and does nothing else. It serves
+/// custom transaction managers and tests. Savepoints are not supported.
 pub struct SimpleTransactionStatus {
     new_transaction: bool,
     rollback_only: AtomicBool,
@@ -62,14 +124,18 @@ pub struct SimpleTransactionStatus {
 }
 
 impl SimpleTransactionStatus {
+    /// Creates a status that reports a new transaction.
     pub fn new() -> Self {
         Self::with_new_transaction(true)
     }
 
+    /// Creates a status that reports a new transaction, or a joined one when `new_transaction` is
+    /// `false`.
     pub fn with_new_transaction(new_transaction: bool) -> Self {
         Self { new_transaction, rollback_only: AtomicBool::new(false), completed: AtomicBool::new(false) }
     }
 
+    /// Marks the transaction as completed.
     pub fn set_completed(&self) {
         self.completed.store(true, Ordering::SeqCst);
     }
@@ -122,6 +188,13 @@ fn not_supported() -> TransactionError {
     TransactionError::NestedNotSupported("This transaction does not support savepoints".into())
 }
 
+/// The [`TransactionStatus`] of a [`TransactionManager`](crate::TransactionManager).
+///
+/// It holds the transaction object of the driver, the resources of a transaction that this call
+/// suspended, and the savepoint of a nested call.
+///
+/// When a status is dropped before it completed, because the call was cancelled, the transaction
+/// it started is rolled back, and a transaction it had joined is marked rollback-only.
 pub struct ManagedTransactionStatus<D: TransactionDriver> {
     driver: Arc<D>,
     transaction_name: Option<String>,
@@ -170,18 +243,25 @@ impl<D: TransactionDriver> ManagedTransactionStatus<D> {
         }
     }
 
+    /// Returns the transaction object of the driver, or `None` when the call runs without a
+    /// transaction.
     pub fn transaction(&self) -> Option<&D::Transaction> {
         self.transaction.as_ref()
     }
 
+    /// Returns whether this call opened the synchronization scope, and therefore triggers the
+    /// synchronization callbacks when it completes.
     pub fn is_new_synchronization(&self) -> bool {
         self.new_synchronization
     }
 
+    /// Returns whether this call marked the transaction rollback-only through
+    /// [`set_rollback_only`](TransactionExecution::set_rollback_only).
     pub fn is_local_rollback_only(&self) -> bool {
         self.rollback_only.load(Ordering::SeqCst)
     }
 
+    /// Returns whether the transaction is marked rollback-only by any call that joined it.
     pub fn is_global_rollback_only(&self) -> bool {
         self.transaction.as_ref().is_some_and(|transaction| self.driver.is_rollback_only(transaction))
     }

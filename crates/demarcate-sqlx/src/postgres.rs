@@ -12,6 +12,8 @@ use sqlx::pool::PoolConnection;
 use sqlx::{AssertSqlSafe, PgConnection, PgPool, Postgres, Transaction};
 use tokio::sync::OwnedMutexGuard;
 
+/// The position of the synchronization that releases a connection held for a scope without a
+/// transaction. Synchronizations with a lower order run before the connection is released.
 pub const CONNECTION_SYNCHRONIZATION_ORDER: i32 = 1000;
 
 static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
@@ -43,6 +45,10 @@ const BESIDE_SAVEPOINT: &str = "A savepoint of another call is open on the conne
      own. Await the nested call before the other work, or give the other work its own transaction with \
      propagation = RequiresNew";
 
+/// The connection of one transaction, bound to the transaction context under the key of its pool.
+///
+/// It keeps the connection, the rollback-only mark, the deadline and the open savepoints.
+/// Application code does not use it; it is public for code that inspects the context.
 pub struct ConnectionHolder {
     connection: Arc<tokio::sync::Mutex<Option<Conn>>>,
     synchronized_with_transaction: AtomicBool,
@@ -69,18 +75,27 @@ impl ConnectionHolder {
             reference_count: AtomicUsize::new(0),
         }
     }
+    /// Returns whether the connection is held for the duration of a transaction or a synchronization
+    /// scope.
     pub fn is_synchronized_with_transaction(&self) -> bool {
         self.synchronized_with_transaction.load(Ordering::SeqCst)
     }
+    /// Records whether the connection is held for the duration of a transaction or a synchronization
+    /// scope.
     pub fn set_synchronized_with_transaction(&self, value: bool) {
         self.synchronized_with_transaction.store(value, Ordering::SeqCst);
     }
+    /// Returns whether the connection runs a transaction that the transaction manager started.
     pub fn is_transaction_active(&self) -> bool {
         self.transaction_active.load(Ordering::SeqCst)
     }
     fn set_transaction_active(&self, value: bool) {
         self.transaction_active.store(value, Ordering::SeqCst);
     }
+    /// Marks the transaction rollback-only.
+    ///
+    /// The mark remembers how many open savepoints the calling future is inside of. A rollback to
+    /// one of those savepoints removes it; a rollback to any other savepoint keeps it.
     pub fn set_rollback_only(&self) {
         let depth = {
             let savepoints = self.savepoints.lock().expect("savepoints lock");
@@ -89,9 +104,11 @@ impl ConnectionHolder {
         let mut marked = self.rollback_only_depth.lock().expect("rollback-only lock");
         *marked = Some(marked.map_or(depth, |existing| existing.min(depth)));
     }
+    /// Removes the rollback-only mark.
     pub fn reset_rollback_only(&self) {
         *self.rollback_only_depth.lock().expect("rollback-only lock") = None;
     }
+    /// Returns whether the transaction is marked rollback-only.
     pub fn is_rollback_only(&self) -> bool {
         self.rollback_only_depth.lock().expect("rollback-only lock").is_some()
     }
@@ -143,12 +160,20 @@ impl ConnectionHolder {
     fn savepoint_index(&self, name: &str) -> Option<usize> {
         self.savepoints.lock().expect("savepoints lock").iter().position(|(existing, _)| existing == name)
     }
+    /// Sets the deadline of the transaction to the given duration from now.
     pub fn set_timeout(&self, timeout: Duration) {
         *self.deadline.lock().expect("deadline lock") = Some(Instant::now() + timeout);
     }
+    /// Returns whether the transaction has a deadline.
     pub fn has_timeout(&self) -> bool {
         self.deadline.lock().expect("deadline lock").is_some()
     }
+    /// Returns the time until the deadline, or `None` when there is no deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactionError::TimedOut`] and marks the transaction rollback-only when the
+    /// deadline has passed.
     pub fn time_to_live(&self) -> Result<Option<Duration>, TransactionError> {
         let Some(deadline) = *self.deadline.lock().expect("deadline lock") else {
             return Ok(None);
@@ -160,9 +185,11 @@ impl ConnectionHolder {
         }
         Ok(Some(remaining))
     }
+    /// Counts one more handle to the connection in use.
     pub fn requested(&self) {
         self.reference_count.fetch_add(1, Ordering::SeqCst);
     }
+    /// Counts one handle to the connection as returned.
     pub fn released(&self) {
         let mut current = self.reference_count.load(Ordering::SeqCst);
         while current > 0 {
@@ -172,6 +199,7 @@ impl ConnectionHolder {
             }
         }
     }
+    /// Returns whether a handle to the connection is in use.
     pub fn is_open(&self) -> bool {
         self.reference_count.load(Ordering::SeqCst) > 0
     }
@@ -229,6 +257,24 @@ impl ResourceHolder for ConnectionHolder {
     }
 }
 
+/// A PostgreSQL pool that runs every query on the connection of the current transaction.
+///
+/// Pass a reference to it wherever sqlx takes an executor:
+/// `sqlx::query("...").execute(&pool)`. Inside a transaction the query runs on the connection of
+/// that transaction. Outside of one it runs on a pooled connection in autocommit mode, unless the
+/// pool was made with [`transaction_required`](TransactionalPool::transaction_required).
+///
+/// The queries of one transaction run one after another. Awaiting two of them at once returns an
+/// error; it does not open a second connection.
+///
+/// A statement that fails inside a transaction is recorded. When the transactional function then
+/// returns `Ok`, the commit checks with the server and returns
+/// [`TransactionError::UnexpectedRollback`] if PostgreSQL has aborted the transaction.
+///
+/// An error of the transaction infrastructure raised during a query arrives as
+/// [`sqlx::Error::Configuration`] that wraps the [`TransactionError`].
+///
+/// Cloning is cheap; clones share the pool and the transaction.
 #[derive(Clone, Debug)]
 pub struct TransactionalPool {
     inner: PgPool,
@@ -237,6 +283,10 @@ pub struct TransactionalPool {
 }
 
 impl TransactionalPool {
+    /// Wraps a sqlx pool.
+    ///
+    /// Create one `TransactionalPool` for each `PgPool` and clone it. Two pools created from the
+    /// same `PgPool` do not see each other's transactions.
     pub fn new(pool: PgPool) -> Self {
         let id = NEXT_POOL_ID.fetch_add(1, Ordering::SeqCst);
         Self {
@@ -246,18 +296,25 @@ impl TransactionalPool {
         }
     }
 
+    /// Returns a pool that refuses to run a query outside a transaction.
+    ///
+    /// Give this pool to a repository whose functions must always run inside a transaction. A call
+    /// without one returns [`TransactionError::NoTransaction`] instead of running in autocommit mode.
     pub fn transaction_required(&self) -> Self {
         Self { transaction_required: true, ..self.clone() }
     }
 
+    /// Returns whether this pool refuses to run a query outside a transaction.
     pub fn is_transaction_required(&self) -> bool {
         self.transaction_required
     }
 
+    /// Returns the sqlx pool. A query on it does not take part in any transaction.
     pub fn inner(&self) -> &PgPool {
         &self.inner
     }
 
+    /// Returns the key under which the connection of a transaction is bound to the context.
     pub fn resource_key(&self) -> &ResourceKey {
         &self.key
     }
@@ -266,10 +323,17 @@ impl TransactionalPool {
         synchronization::resource(&self.key).and_then(|resource| resource.downcast::<ConnectionHolder>())
     }
 
+    /// Returns whether a connection of this pool is bound to the context of the calling future.
     pub fn is_connection_transactional(&self) -> bool {
         self.bound_holder().is_some()
     }
 
+    /// Returns the connection of the current transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactionError::NoTransaction`] when the calling future runs in no transaction of
+    /// this pool.
     pub async fn acquire_in_transaction(&self) -> Result<TransactionalConnection, TransactionError> {
         synchronization::check_access()?;
         if !self.bound_holder().is_some_and(|holder| holder.is_transaction_active()) {
@@ -284,6 +348,19 @@ impl TransactionalPool {
         self.acquire_any().await
     }
 
+    /// Returns the connection of the current transaction, or a pooled connection when there is none.
+    ///
+    /// Prefer passing the pool as the executor. Use this for an API that needs a
+    /// `&mut PgConnection`. Drop the returned connection before the next query through the pool and
+    /// before calling another transactional function; while it is alive the connection is in use.
+    ///
+    /// Note that a statement that fails on the returned connection is not recorded, so the commit
+    /// does not detect that PostgreSQL aborted the transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connection of the transaction is already in use, when a nested
+    /// transaction of another call owns it, or when no connection can be obtained.
     pub async fn acquire(&self) -> Result<TransactionalConnection, TransactionError> {
         if self.transaction_required {
             return self.acquire_in_transaction().await;
@@ -457,6 +534,11 @@ enum Handle {
     Standalone(PoolConnection<Postgres>),
 }
 
+/// A connection obtained from a [`TransactionalPool`]: the connection of the current transaction,
+/// or a pooled connection.
+///
+/// It dereferences to [`PgConnection`]. Dropping it does not commit or roll back; the transaction
+/// manager completes the transaction.
 pub struct TransactionalConnection(Handle);
 
 impl TransactionalConnection {
@@ -584,6 +666,13 @@ impl PgTransactionObject {
     }
 }
 
+/// The [`TransactionDriver`] for PostgreSQL through sqlx.
+///
+/// A nested transaction is a savepoint on the connection of the outer transaction. While it
+/// runs, that connection belongs to the nested call, and a future beside it that uses the
+/// connection gets an error.
+///
+/// A read-only transaction begins as `READ ONLY`, so PostgreSQL rejects a write in it.
 pub struct PgTransactionDriver {
     pool: TransactionalPool,
 }
@@ -865,12 +954,18 @@ fn release_failure_is_ignorable(error: &sqlx::Error) -> bool {
     code_matches || message.contains("not supported") || message.contains("3B001")
 }
 
+/// The transaction manager for PostgreSQL through sqlx.
 pub type PgTransactionManager = TransactionManager<PgTransactionDriver>;
 
+/// Creates a transaction manager for the given pool, with nested transactions allowed.
+///
+/// Register it once at startup:
+/// `demarcate::registry().set_default(Arc::new(manager(pool.clone())))`.
 pub fn manager(pool: TransactionalPool) -> PgTransactionManager {
     manager_with_settings(pool, ManagerSettings { nested_transaction_allowed: true, ..ManagerSettings::default() })
 }
 
+/// Creates a transaction manager for the given pool with the given settings.
 pub fn manager_with_settings(pool: TransactionalPool, settings: ManagerSettings) -> PgTransactionManager {
     TransactionManager::with_settings(PgTransactionDriver { pool }, settings)
 }

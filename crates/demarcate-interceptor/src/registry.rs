@@ -11,14 +11,28 @@ struct Managers {
     named: HashMap<String, Arc<dyn PlatformTransactionManager>>,
 }
 
+/// Published when a `#[transactional]` function rolls back because it returned an error or
+/// panicked.
+///
+/// Register a listener with
+/// [`TransactionManagerRegistry::add_rollback_listener`]. The event is published before the
+/// rollback happens.
 pub struct MethodRollbackEvent {
+    /// The path of the function.
     pub method: String,
+    /// The type name of the error, or `"panic"`.
     pub failure: &'static str,
+    /// The status of the transaction that is about to roll back.
     pub transaction: Arc<dyn TransactionStatus>,
 }
 
 type RollbackListener = Arc<dyn Fn(&MethodRollbackEvent) + Send + Sync>;
 
+/// The transaction managers that `#[transactional]` functions use.
+///
+/// An application registers its managers once at startup: one default manager, and named
+/// managers for functions that say `transaction_manager = "name"`. The global registry is
+/// [`registry`].
 #[derive(Default)]
 pub struct TransactionManagerRegistry {
     managers: RwLock<Managers>,
@@ -26,18 +40,22 @@ pub struct TransactionManagerRegistry {
 }
 
 impl TransactionManagerRegistry {
+    /// Creates an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets the manager for functions that do not name one.
     pub fn set_default(&self, manager: Arc<dyn PlatformTransactionManager>) {
         self.managers.write().expect("registry lock").default = Some(manager);
     }
 
+    /// Registers a manager under a name.
     pub fn register(&self, qualifier: impl Into<String>, manager: Arc<dyn PlatformTransactionManager>) {
         self.managers.write().expect("registry lock").named.insert(qualifier.into(), manager);
     }
 
+    /// Registers a listener for [`MethodRollbackEvent`].
     pub fn add_rollback_listener(&self, listener: impl Fn(&MethodRollbackEvent) + Send + Sync + 'static) {
         self.rollback_listeners.write().expect("registry lock").push(Arc::new(listener));
     }
@@ -49,6 +67,12 @@ impl TransactionManagerRegistry {
         }
     }
 
+    /// Returns the manager for the given attribute: the one registered under its qualifier, or the
+    /// default manager.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error that names the missing registration when no such manager is registered.
     pub fn determine_transaction_manager(
         &self,
         attribute: &TransactionAttribute,
@@ -74,6 +98,7 @@ impl TransactionManagerRegistry {
     }
 }
 
+/// Returns the global registry that `#[transactional]` functions use.
 pub fn registry() -> &'static TransactionManagerRegistry {
     static REGISTRY: OnceLock<TransactionManagerRegistry> = OnceLock::new();
     REGISTRY.get_or_init(TransactionManagerRegistry::new)

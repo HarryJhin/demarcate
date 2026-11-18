@@ -1,3 +1,10 @@
+//! The `#[transactional]` attribute macro.
+//!
+//! The generated code refers to the `demarcate` crate by that name, so an application depends
+//! on `demarcate` and uses the macro through it.
+
+#![warn(missing_docs)]
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, quote_spanned};
@@ -212,6 +219,55 @@ fn transactional_impl(attribute: &TokenStream2, mut item: ItemImpl) -> TokenStre
     quote! { #item #(#errors)* }.into()
 }
 
+/// Runs an `async fn`, or every `async fn` of an `impl` block, in a transaction.
+///
+/// The transaction commits when the function returns `Ok`. It rolls back when the function
+/// returns `Err`, unless a rollback rule says otherwise, and when the function panics. The
+/// function must return `Result<T, E>` where `E: From<TransactionError>`, so that a failure to
+/// begin, commit or roll back can be returned.
+///
+/// On an `impl` block the attribute applies to every `async fn` in the block. An attribute on
+/// a method replaces the one on the block for that method. Methods that are not transactional
+/// go in a separate `impl` block. With `#[async_trait]`, put `#[transactional]` above it.
+///
+/// A call applies to the function itself, so a call from another method of the same type is
+/// transactional too.
+///
+/// # Arguments
+///
+/// All arguments are optional.
+///
+/// | Argument | Meaning | Default |
+/// |:--|:--|:--|
+/// | `propagation = Required` | How the call relates to a running transaction; a variant of `Propagation` | `Required` |
+/// | `isolation = Serializable` | The isolation level of a transaction that the call starts; a variant of `Isolation` | the default of the database |
+/// | `timeout = 30` | Seconds after which a transaction that the call starts runs no further statements | the default of the manager |
+/// | `read_only` or `read_only = true` | Whether a transaction that the call starts is read-only | `false` |
+/// | `rollback_for = [E]` | Roll back when the error type is `E` | every error rolls back |
+/// | `no_rollback_for = [E]` | Commit when the error type is `E` | |
+/// | `rollback_for_name = "Timeout"` | Roll back when the name of the error type contains the text | |
+/// | `no_rollback_for_name = "NotFound"` | Commit when the name of the error type contains the text | |
+/// | `rollback_if = test` | Roll back when `test(&error)` is `true` | |
+/// | `no_rollback_if = test` | Commit when `test(&error)` is `true` | |
+/// | `transaction_manager = "name"` | The registered transaction manager to use | the default manager |
+/// | `label = "name"` | A free-form label, available to a custom manager or listener | |
+///
+/// The isolation, timeout and read-only arguments apply only when the call starts a new
+/// transaction. A call that joins the transaction of its caller keeps the settings of that
+/// transaction.
+///
+/// When rules disagree, a rule that tests the value (`rollback_if`, `no_rollback_if`) wins
+/// over a rule that names the type.
+///
+/// # Examples
+///
+/// ```ignore
+/// #[transactional(read_only)]
+/// async fn find(&self, id: i64) -> Result<Order, Error> { /* ... */ }
+///
+/// #[transactional(propagation = RequiresNew, no_rollback_if = Error::is_not_found)]
+/// async fn audit(&self, event: &str) -> Result<(), Error> { /* ... */ }
+/// ```
 #[proc_macro_attribute]
 pub fn transactional(arguments: TokenStream, item: TokenStream) -> TokenStream {
     let mut parsed = Arguments::default();

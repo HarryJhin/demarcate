@@ -1,3 +1,15 @@
+//! The invocation flow behind `#[transactional]`: transaction attributes, rollback rules and
+//! the registry of transaction managers.
+//!
+//! [`invoke_within_transaction`] runs a future in a transaction described by a
+//! [`TransactionAttribute`]. It obtains the transaction from a manager in the [`registry`],
+//! commits when the future returns `Ok`, and applies the [`RollbackRule`]s of the attribute
+//! when it returns `Err`. The `#[transactional]` attribute macro generates a call to it.
+//!
+//! Applications normally depend on the `demarcate` crate, which re-exports these items.
+
+#![warn(missing_docs)]
+
 mod aspect;
 mod attribute;
 mod registry;

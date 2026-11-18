@@ -1,3 +1,72 @@
+//! Declarative transactions.
+//!
+//! Put [`#[transactional]`](macro@transactional) on a function, and the function runs in a
+//! transaction: it commits when the function returns `Ok` and rolls back when it returns `Err`
+//! or panics. Functions that it calls join the same transaction without a transaction
+//! argument.
+//!
+//! ```ignore
+//! use demarcate::transactional;
+//!
+//! struct Orders {
+//!     pool: demarcate::postgres::TransactionalPool,
+//! }
+//!
+//! impl Orders {
+//!     #[transactional]
+//!     pub async fn place(&self, item: &str) -> Result<(), Error> {
+//!         self.insert(item).await?;
+//!         self.audit("placed").await
+//!     }
+//!
+//!     #[transactional(propagation = RequiresNew)]
+//!     async fn audit(&self, event: &str) -> Result<(), Error> {
+//!         sqlx::query("insert into audit values($1)").bind(event.to_owned()).execute(&self.pool).await?;
+//!         Ok(())
+//!     }
+//!
+//!     async fn insert(&self, item: &str) -> Result<(), Error> {
+//!         sqlx::query("insert into orders values($1)").bind(item.to_owned()).execute(&self.pool).await?;
+//!         Ok(())
+//!     }
+//! }
+//! ```
+//!
+//! # Setup
+//!
+//! Enable the `sqlx-postgres` feature and register a transaction manager once at startup:
+//!
+//! ```ignore
+//! let pool = demarcate::postgres::TransactionalPool::new(pg_pool);
+//! demarcate::registry().set_default(std::sync::Arc::new(demarcate::postgres::manager(pool.clone())));
+//! ```
+//!
+//! The error type of a transactional function implements `From<TransactionError>`, because
+//! beginning, committing and rolling back can fail.
+//!
+//! # What a transaction is bound to
+//!
+//! A transaction is bound to the call that started it. The futures of that call see it while
+//! they are polled, wherever they are polled:
+//!
+//! - Futures that run beside each other in one function (`join!`, `select!`) are in the
+//!   transaction of that function. The queries of one transaction still run one after another.
+//! - A spawned task is not in the transaction of the task that spawned it. Start a new
+//!   transaction inside the task.
+//! - A call that is cancelled, because its future is dropped, is rolled back.
+//!
+//! # Where to look
+//!
+//! - [`#[transactional]`](macro@transactional) for the arguments of the attribute.
+//! - [`Propagation`] for how a call relates to a transaction that is already running.
+//! - [`RollbackRule`] for which errors roll back.
+//! - [`TransactionTemplate`] to set a transaction boundary in code.
+//! - [`on_transaction`] and [`TransactionSynchronization`] to run code at a phase of the
+//!   transaction.
+//! - [`TransactionDriver`] to support another database library.
+
+#![warn(missing_docs)]
+
 pub use demarcate_core::*;
 pub use demarcate_interceptor::{
     MethodRollbackEvent, RollbackRule, TransactionAttribute, TransactionInfo, TransactionManagerRegistry,
@@ -8,5 +77,6 @@ pub use demarcate_interceptor::{
 pub use demarcate_interceptor::{TransactionalReturn, assert_transactional_return};
 pub use demarcate_macros::transactional;
 
+/// The PostgreSQL driver and the transaction-aware pool, through sqlx.
 #[cfg(feature = "sqlx-postgres")]
 pub use demarcate_sqlx::postgres;

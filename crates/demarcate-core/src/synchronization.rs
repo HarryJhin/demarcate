@@ -10,83 +10,153 @@ use crate::definition::Isolation;
 use crate::error::{BoxError, TransactionError};
 use crate::status::Savepoint;
 
+/// The outcome of a transaction, as passed to
+/// [`TransactionSynchronization::after_completion`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionStatus {
+    /// The transaction was committed.
     Committed,
+    /// The transaction was rolled back.
     RolledBack,
+    /// The outcome is not known, for example because the commit failed, or because the transaction
+    /// is controlled from outside the transaction manager.
     Unknown,
 }
 
+/// Callbacks for the life cycle of one transaction.
+///
+/// A synchronization is registered with [`register_synchronization`] while a transaction or a
+/// synchronization scope is active, and belongs to that transaction. It is discarded when the
+/// transaction completes. Resource code uses it to release what it bound to the transaction;
+/// application code usually registers a listener with
+/// [`on_transaction`](crate::on_transaction) instead.
+///
+/// The callbacks run in the order of [`order`](TransactionSynchronization::order). Every method
+/// has an empty default implementation.
+///
+/// Note that the callbacks after completion run when the transaction is over. Data access in them
+/// is not committed unless it runs in a
+/// [`Propagation::RequiresNew`](crate::Propagation::RequiresNew) transaction.
+///
+/// When the call that owns the transaction is cancelled, no further callbacks run.
 pub trait TransactionSynchronization: Send + Sync {
+    /// Returns the position of this synchronization among the others; lower values run first.
+    ///
+    /// The default is `i32::MAX`, the last position.
     fn order(&self) -> i32 {
         i32::MAX
     }
+    /// Called when the transaction is suspended. Unbind what this synchronization bound to the
+    /// context.
     fn suspend(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async { Ok(()) })
     }
+    /// Called when the transaction resumes. Bind again what
+    /// [`suspend`](TransactionSynchronization::suspend) unbound.
     fn resume(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
         Box::pin(async { Ok(()) })
     }
+    /// Called when [`TransactionStatus::flush`](crate::TransactionStatus::flush) is called. Write
+    /// pending changes of the underlying session to the database.
     fn flush(&self) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async { Ok(()) })
     }
+    /// Called after a savepoint was created for a nested transaction.
     fn savepoint<'a>(&'a self, _savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), BoxError>> {
         Box::pin(async { Ok(()) })
     }
+    /// Called before the transaction is rolled back to the given savepoint.
     fn savepoint_rollback<'a>(&'a self, _savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), BoxError>> {
         Box::pin(async { Ok(()) })
     }
+    /// Called before the commit, and before
+    /// [`before_completion`](TransactionSynchronization::before_completion).
+    ///
+    /// This runs inside the transaction and can still write to the database. An error rolls the
+    /// transaction back and is returned to the caller of the commit. `read_only` tells whether the
+    /// transaction was defined as read-only.
     fn before_commit(&self, _read_only: bool) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async { Ok(()) })
     }
+    /// Called before the commit or the rollback. Release resources here.
+    ///
+    /// An error is logged and does not change the outcome.
     fn before_completion(&self) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async { Ok(()) })
     }
+    /// Called after a successful commit.
+    ///
+    /// An error is returned to the caller of the commit; the transaction stays committed.
     fn after_commit(&self) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async { Ok(()) })
     }
+    /// Called after the commit or the rollback, with the outcome.
+    ///
+    /// An error is logged and does not reach the caller.
     fn after_completion(&self, _status: CompletionStatus) -> BoxFuture<'_, Result<(), BoxError>> {
         Box::pin(async { Ok(()) })
     }
 }
 
+/// A resource that is bound to the transaction context and has transactional state of its own,
+/// for example a holder of a connection.
 pub trait ResourceHolder: Any + Send + Sync {
+    /// Clears the transactional state of the holder after the transaction completed.
     fn reset(&self);
+    /// Tells the holder that it was unbound from the context.
     fn unbound(&self);
+    /// Returns whether the holder is no longer usable. A void holder is removed from the context
+    /// when it is looked up.
     fn is_void(&self) -> bool;
 }
 
+/// The key under which a resource is bound to the transaction context.
+///
+/// A driver uses one key for each pool or session factory, so that data access code finds the
+/// resource of the transaction that belongs to its own pool.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ResourceKey {
+    /// The identity of a shared object, see [`ResourceKey::of`].
     Pointer(usize),
+    /// A name, see [`ResourceKey::named`].
     Name(String),
 }
 
 impl ResourceKey {
+    /// Creates a key from the identity of the given shared object. Two clones of one `Arc` give the
+    /// same key.
     pub fn of<T: ?Sized>(resource: &Arc<T>) -> Self {
         Self::Pointer(Arc::as_ptr(resource) as *const () as usize)
     }
+    /// Creates a key from a name.
     pub fn named(name: impl Into<String>) -> Self {
         Self::Name(name.into())
     }
 }
 
+/// A value bound to the transaction context under a [`ResourceKey`].
 #[derive(Clone)]
 pub enum BoundResource {
+    /// Any shared value.
     Value(Arc<dyn Any + Send + Sync>),
+    /// A holder with transactional state, which the context can ask whether it is still usable.
     Holder(Arc<dyn ResourceHolder>),
 }
 
 impl BoundResource {
+    /// Wraps a shared value.
     pub fn value<T: Any + Send + Sync>(value: Arc<T>) -> Self {
         Self::Value(value)
     }
+    /// Wraps a resource holder.
     pub fn holder<T: ResourceHolder>(holder: Arc<T>) -> Self {
         Self::Holder(holder)
     }
+    /// Returns whether this is a holder that is no longer usable.
     pub fn is_void(&self) -> bool {
         matches!(self, Self::Holder(holder) if holder.is_void())
     }
+    /// Returns the bound value as the given type, or `None` when it has another type.
     pub fn downcast<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
         let any: Arc<dyn Any + Send + Sync> = match self {
             Self::Value(value) => value.clone(),
@@ -330,10 +400,20 @@ fn unbind(key: &ResourceKey) -> Result<Option<BoundResource>, TransactionError> 
     Ok(removed.filter(|value| !value.is_void()))
 }
 
+/// Returns whether the calling future has a transaction context.
+///
+/// A context exists inside a `#[transactional]` function, a
+/// [`TransactionTemplate`](crate::TransactionTemplate) action and a future wrapped in [`scope`].
 pub fn is_context_active() -> bool {
     current().is_some()
 }
 
+/// Runs the future with a transaction context.
+///
+/// Code that calls a [`PlatformTransactionManager`](crate::PlatformTransactionManager) directly
+/// needs this; `#[transactional]` and [`TransactionTemplate`](crate::TransactionTemplate) open a
+/// context themselves. When the calling future already has a context, the future runs in that
+/// context and no new one is created.
 pub async fn scope<F: Future>(future: F) -> F::Output {
     if is_context_active() { future.await } else { Scoped { context: Context::root(), future: Box::pin(future) }.await }
 }
@@ -390,6 +470,11 @@ pub(crate) const OUT_OF_ORDER: &str = "Transactions on this context completed ou
      still open. The transaction was rolled back. Complete transactions in the reverse order of their creation, or \
      use #[transactional] or TransactionTemplate, which give every call its own context";
 
+/// Spawns a Tokio task that has an empty transaction context of its own.
+///
+/// The task does not take part in the transaction of the future that spawns it. A transaction is
+/// bound to the call that started it and cannot be shared between tasks; start a new transaction
+/// inside the task.
 #[cfg(feature = "tokio")]
 pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
 where
@@ -399,14 +484,17 @@ where
     tokio::spawn(Scoped { context: Context::root(), future: Box::pin(future) })
 }
 
+/// Returns the keys of all resources bound to the context of the calling future.
 pub fn resource_keys() -> Vec<ResourceKey> {
     read(Vec::new(), |state| state.resources.keys().cloned().collect())
 }
 
+/// Returns whether a resource is bound under the given key.
 pub fn has_resource(key: &ResourceKey) -> bool {
     resource(key).is_some()
 }
 
+/// Returns the resource bound under the given key.
 pub fn resource(key: &ResourceKey) -> Option<BoundResource> {
     let value = read(None, |state| state.resources.get(key).cloned())?;
     if value.is_void() {
@@ -417,6 +505,12 @@ pub fn resource(key: &ResourceKey) -> Option<BoundResource> {
     Some(value)
 }
 
+/// Binds a resource to the context of the calling future under the given key.
+///
+/// # Errors
+///
+/// Returns an error when a resource is already bound under the key, in which case the existing
+/// resource stays bound, or when the calling future has no context.
 pub fn bind_resource(key: ResourceKey, value: BoundResource) -> Result<(), TransactionError> {
     match bind(&key, value)? {
         Some(_) => Err(TransactionError::InvalidState(format!("Already value for key [{key:?}] bound to task"))),
@@ -424,6 +518,14 @@ pub fn bind_resource(key: ResourceKey, value: BoundResource) -> Result<(), Trans
     }
 }
 
+/// Binds a resource for the duration of the current transaction.
+///
+/// The resource is unbound while the transaction is suspended, bound again when it resumes, and
+/// removed when it completes. A resource already bound under the key is put back at that point.
+///
+/// # Errors
+///
+/// Returns an error when no synchronization scope is active.
 pub fn bind_synchronized_resource(key: ResourceKey, value: BoundResource) -> Result<(), TransactionError> {
     if !is_synchronization_active() {
         return Err(TransactionError::InvalidState("Transaction synchronization is not active".into()));
@@ -432,18 +534,32 @@ pub fn bind_synchronized_resource(key: ResourceKey, value: BoundResource) -> Res
     register_synchronization(Arc::new(SynchronizedResource { key, value, old_value }))
 }
 
+/// Removes and returns the resource bound under the given key.
+///
+/// # Errors
+///
+/// Returns an error when no resource is bound under the key.
 pub fn unbind_resource(key: &ResourceKey) -> Result<BoundResource, TransactionError> {
     unbind(key)?.ok_or_else(|| TransactionError::InvalidState(format!("No value for key [{key:?}] bound to task")))
 }
 
+/// Removes and returns the resource bound under the given key, or returns `None` when there is
+/// none.
 pub fn unbind_resource_if_possible(key: &ResourceKey) -> Option<BoundResource> {
     unbind(key).ok().flatten()
 }
 
+/// Returns whether a synchronization scope is active, that is whether
+/// [`register_synchronization`] can be called.
 pub fn is_synchronization_active() -> bool {
     read(false, |state| state.synchronizations.is_some())
 }
 
+/// Opens a synchronization scope. A transaction manager calls this when a transaction begins.
+///
+/// # Errors
+///
+/// Returns an error when a synchronization scope is already active.
 pub fn init_synchronization() -> Result<(), TransactionError> {
     write(|state| {
         if state.synchronizations.is_some() {
@@ -456,6 +572,13 @@ pub fn init_synchronization() -> Result<(), TransactionError> {
     })
 }
 
+/// Registers a synchronization with the current transaction.
+///
+/// Registering the same object twice has no effect.
+///
+/// # Errors
+///
+/// Returns an error when no synchronization scope is active.
 pub fn register_synchronization(synchronization: Arc<dyn TransactionSynchronization>) -> Result<(), TransactionError> {
     write(|state| {
         let synchronizations = state
@@ -469,6 +592,11 @@ pub fn register_synchronization(synchronization: Arc<dyn TransactionSynchronizat
     })
 }
 
+/// Returns the registered synchronizations in the order in which their callbacks run.
+///
+/// # Errors
+///
+/// Returns an error when no synchronization scope is active.
 pub fn synchronizations() -> Result<Vec<Arc<dyn TransactionSynchronization>>, TransactionError> {
     let mut synchronizations = write(|state| {
         state
@@ -480,6 +608,12 @@ pub fn synchronizations() -> Result<Vec<Arc<dyn TransactionSynchronization>>, Tr
     Ok(synchronizations)
 }
 
+/// Closes the synchronization scope and discards the registered synchronizations. A transaction
+/// manager calls this when a transaction completes.
+///
+/// # Errors
+///
+/// Returns an error when no synchronization scope is active.
 pub fn clear_synchronization() -> Result<(), TransactionError> {
     let cleared = write(|state| {
         state.synchronizations.take().ok_or_else(|| {
@@ -490,6 +624,7 @@ pub fn clear_synchronization() -> Result<(), TransactionError> {
     Ok(())
 }
 
+/// Records the name of the current transaction. A transaction manager calls this.
 pub fn set_current_transaction_name(name: Option<String>) {
     let _ = write(|state| {
         state.current_transaction_name = name;
@@ -497,10 +632,12 @@ pub fn set_current_transaction_name(name: Option<String>) {
     });
 }
 
+/// Returns the name of the current transaction, or `None` when there is none or it has no name.
 pub fn current_transaction_name() -> Option<String> {
     read(None, |state| state.current_transaction_name.clone())
 }
 
+/// Records whether the current transaction is read-only. A transaction manager calls this.
 pub fn set_current_transaction_read_only(read_only: bool) {
     let _ = write(|state| {
         state.current_transaction_read_only = read_only;
@@ -508,10 +645,12 @@ pub fn set_current_transaction_read_only(read_only: bool) {
     });
 }
 
+/// Returns whether the current transaction was defined as read-only.
 pub fn is_current_transaction_read_only() -> bool {
     read(false, |state| state.current_transaction_read_only)
 }
 
+/// Records the isolation level of the current transaction. A transaction manager calls this.
 pub fn set_current_transaction_isolation_level(isolation_level: Option<Isolation>) {
     let _ = write(|state| {
         state.current_transaction_isolation_level = isolation_level;
@@ -519,10 +658,13 @@ pub fn set_current_transaction_isolation_level(isolation_level: Option<Isolation
     });
 }
 
+/// Returns the isolation level that the current transaction was defined with, or `None` when it
+/// uses the default of the database or no transaction is running.
 pub fn current_transaction_isolation_level() -> Option<Isolation> {
     read(None, |state| state.current_transaction_isolation_level)
 }
 
+/// Records whether an actual transaction is running. A transaction manager calls this.
 pub fn set_actual_transaction_active(active: bool) {
     let _ = write(|state| {
         state.actual_transaction_active = active;
@@ -530,10 +672,16 @@ pub fn set_actual_transaction_active(active: bool) {
     });
 }
 
+/// Returns whether an actual transaction is running for the calling future.
+///
+/// This is `false` inside a synchronization scope without a transaction, where
+/// [`is_synchronization_active`] is `true`.
 pub fn is_actual_transaction_active() -> bool {
     read(false, |state| state.actual_transaction_active)
 }
 
+/// Clears the synchronization scope and the properties of the current transaction. Bound
+/// resources stay bound.
 pub fn clear() {
     let _ = write(|state| {
         let cleared = state.synchronizations.take();
@@ -584,6 +732,7 @@ fn callback_error(error: BoxError) -> TransactionError {
     }
 }
 
+/// Calls [`TransactionSynchronization::flush`] on the registered synchronizations.
 pub async fn trigger_flush() -> Result<(), TransactionError> {
     if is_synchronization_active() {
         for synchronization in synchronizations()? {
@@ -611,6 +760,8 @@ pub(crate) async fn trigger_savepoint_rollback(savepoint: &Savepoint) -> Result<
     Ok(())
 }
 
+/// Calls [`TransactionSynchronization::before_commit`] on the registered synchronizations and
+/// stops at the first error.
 pub async fn trigger_before_commit(read_only: bool) -> Result<(), TransactionError> {
     for synchronization in synchronizations()? {
         synchronization.before_commit(read_only).await.map_err(callback_error)?;
@@ -618,6 +769,8 @@ pub async fn trigger_before_commit(read_only: bool) -> Result<(), TransactionErr
     Ok(())
 }
 
+/// Calls [`TransactionSynchronization::before_completion`] on the registered synchronizations.
+/// Errors of the callbacks are logged.
 pub async fn trigger_before_completion() -> Result<(), TransactionError> {
     for synchronization in synchronizations()? {
         if let Err(error) = synchronization.before_completion().await {
@@ -627,10 +780,14 @@ pub async fn trigger_before_completion() -> Result<(), TransactionError> {
     Ok(())
 }
 
+/// Calls [`TransactionSynchronization::after_commit`] on the registered synchronizations and
+/// stops at the first error.
 pub async fn trigger_after_commit() -> Result<(), TransactionError> {
     invoke_after_commit(&synchronizations()?).await
 }
 
+/// Calls [`TransactionSynchronization::after_commit`] on the given synchronizations and stops at
+/// the first error.
 pub async fn invoke_after_commit(
     synchronizations: &[Arc<dyn TransactionSynchronization>],
 ) -> Result<(), TransactionError> {
@@ -640,12 +797,16 @@ pub async fn invoke_after_commit(
     Ok(())
 }
 
+/// Calls [`TransactionSynchronization::after_completion`] on the registered synchronizations.
+/// Errors of the callbacks are logged.
 pub async fn trigger_after_completion(completion_status: CompletionStatus) -> Result<(), TransactionError> {
     let synchronizations = synchronizations()?;
     invoke_after_completion(&synchronizations, completion_status).await;
     Ok(())
 }
 
+/// Calls [`TransactionSynchronization::after_completion`] on the given synchronizations. Errors
+/// of the callbacks are logged.
 pub async fn invoke_after_completion(
     synchronizations: &[Arc<dyn TransactionSynchronization>],
     completion_status: CompletionStatus,

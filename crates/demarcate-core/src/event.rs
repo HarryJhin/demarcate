@@ -4,12 +4,23 @@ use crate::BoxFuture;
 use crate::error::BoxError;
 use crate::synchronization::{self, CompletionStatus, TransactionSynchronization};
 
+/// The point of a transaction at which a listener registered with [`on_transaction`] runs.
+///
+/// The default is [`TransactionPhase::AfterCommit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TransactionPhase {
+    /// Before the commit. The listener runs inside the transaction, and an error from it rolls the
+    /// transaction back.
     BeforeCommit,
+    /// After a successful commit.
+    ///
+    /// The transaction is over when the listener runs. Data access in the listener is not committed
+    /// unless it runs in a [`Propagation::RequiresNew`](crate::Propagation::RequiresNew) transaction.
     #[default]
     AfterCommit,
+    /// After a rollback.
     AfterRollback,
+    /// After the transaction completed, whatever the outcome.
     AfterCompletion,
 }
 
@@ -51,6 +62,21 @@ impl TransactionSynchronization for TransactionalListenerSynchronization {
     }
 }
 
+/// Registers a listener that runs at the given phase of the current transaction.
+///
+/// Returns `true` when the listener was registered or run, and `false` when no transaction is
+/// running and `fallback_execution` is `false`; the listener is then discarded.
+///
+/// With `fallback_execution` set to `true`, the listener runs immediately when no transaction is
+/// running.
+///
+/// The listener belongs to the transaction of the calling future. When that transaction rolls
+/// back, an [`AfterCommit`](TransactionPhase::AfterCommit) listener does not run.
+///
+/// # Errors
+///
+/// Returns the error of the listener when it ran as a fallback, or an error when the transaction
+/// that the calling future joined has already completed.
 pub async fn on_transaction<F, Fut>(
     phase: TransactionPhase,
     fallback_execution: bool,
