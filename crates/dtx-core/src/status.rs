@@ -1,0 +1,241 @@
+use std::any::Any;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use crate::BoxFuture;
+use crate::driver::TransactionDriver;
+use crate::error::TransactionError;
+use crate::manager::SuspendedResourcesHolder;
+use crate::synchronization::{TransactionSynchronizationManager, TransactionSynchronizationUtils};
+
+pub type Savepoint = Arc<dyn Any + Send + Sync>;
+
+pub trait TransactionExecution: Send + Sync {
+    fn transaction_name(&self) -> String {
+        String::new()
+    }
+    fn has_transaction(&self) -> bool {
+        true
+    }
+    fn is_new_transaction(&self) -> bool {
+        true
+    }
+    fn is_nested(&self) -> bool {
+        false
+    }
+    fn is_read_only(&self) -> bool {
+        false
+    }
+    fn set_rollback_only(&self) -> Result<(), TransactionError> {
+        Err(TransactionError::IllegalState("setRollbackOnly not supported".into()))
+    }
+    fn is_rollback_only(&self) -> bool {
+        false
+    }
+    fn is_completed(&self) -> bool {
+        false
+    }
+}
+
+pub trait SavepointManager: Send + Sync {
+    fn create_savepoint(&self) -> BoxFuture<'_, Result<Savepoint, TransactionError>>;
+    fn rollback_to_savepoint<'a>(&'a self, savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>>;
+    fn release_savepoint<'a>(&'a self, savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>>;
+}
+
+pub trait TransactionStatus: TransactionExecution + SavepointManager + Any {
+    fn has_savepoint(&self) -> bool {
+        false
+    }
+    fn flush(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn as_any(&self) -> &dyn Any;
+}
+
+pub struct DefaultTransactionStatus<D: TransactionDriver> {
+    driver: Arc<D>,
+    transaction_name: Option<String>,
+    transaction: Option<D::Transaction>,
+    new_transaction: bool,
+    new_synchronization: bool,
+    nested: bool,
+    read_only: bool,
+    suspended_resources: Mutex<Option<SuspendedResourcesHolder<D>>>,
+    rollback_only: AtomicBool,
+    completed: AtomicBool,
+    savepoint: Mutex<Option<Savepoint>>,
+}
+
+impl<D: TransactionDriver> DefaultTransactionStatus<D> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        driver: Arc<D>,
+        transaction_name: Option<String>,
+        transaction: Option<D::Transaction>,
+        new_transaction: bool,
+        new_synchronization: bool,
+        nested: bool,
+        read_only: bool,
+        suspended_resources: Option<SuspendedResourcesHolder<D>>,
+    ) -> Self {
+        Self {
+            driver,
+            transaction_name,
+            transaction,
+            new_transaction,
+            new_synchronization,
+            nested,
+            read_only,
+            suspended_resources: Mutex::new(suspended_resources),
+            rollback_only: AtomicBool::new(false),
+            completed: AtomicBool::new(false),
+            savepoint: Mutex::new(None),
+        }
+    }
+
+    pub fn transaction(&self) -> Option<&D::Transaction> {
+        self.transaction.as_ref()
+    }
+
+    pub fn is_new_synchronization(&self) -> bool {
+        self.new_synchronization
+    }
+
+    pub fn is_local_rollback_only(&self) -> bool {
+        self.rollback_only.load(Ordering::SeqCst)
+    }
+
+    pub fn is_global_rollback_only(&self) -> bool {
+        self.transaction.as_ref().is_some_and(|transaction| self.driver.is_rollback_only(transaction))
+    }
+
+    pub(crate) fn set_completed(&self) {
+        self.completed.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn take_suspended_resources(&self) -> Option<SuspendedResourcesHolder<D>> {
+        self.suspended_resources.lock().expect("suspended resources lock").take()
+    }
+
+    fn held_savepoint(&self) -> Option<Savepoint> {
+        self.savepoint.lock().expect("savepoint lock").clone()
+    }
+
+    fn set_savepoint(&self, savepoint: Option<Savepoint>) {
+        *self.savepoint.lock().expect("savepoint lock") = savepoint;
+    }
+
+    pub(crate) async fn create_and_hold_savepoint(&self) -> Result<(), TransactionError> {
+        let savepoint = self.driver.create_savepoint(self.require_savepoint_transaction()?).await?;
+        TransactionSynchronizationUtils::trigger_savepoint(&savepoint).await?;
+        self.set_savepoint(Some(savepoint));
+        Ok(())
+    }
+
+    pub(crate) async fn rollback_to_held_savepoint(&self) -> Result<(), TransactionError> {
+        let savepoint = self.held_savepoint().ok_or_else(|| {
+            TransactionError::TransactionUsage(
+                "Cannot roll back to savepoint - no savepoint associated with current transaction".into(),
+            )
+        })?;
+        TransactionSynchronizationUtils::trigger_savepoint_rollback(&savepoint).await?;
+        let transaction = self.require_savepoint_transaction()?;
+        self.driver.rollback_to_savepoint(transaction, &savepoint).await?;
+        self.driver.release_savepoint(transaction, &savepoint).await?;
+        self.set_savepoint(None);
+        Ok(())
+    }
+
+    pub(crate) async fn release_held_savepoint(&self) -> Result<(), TransactionError> {
+        let savepoint = self.held_savepoint().ok_or_else(|| {
+            TransactionError::TransactionUsage(
+                "Cannot release savepoint - no savepoint associated with current transaction".into(),
+            )
+        })?;
+        self.driver.release_savepoint(self.require_savepoint_transaction()?, &savepoint).await?;
+        self.set_savepoint(None);
+        Ok(())
+    }
+
+    fn require_savepoint_transaction(&self) -> Result<&D::Transaction, TransactionError> {
+        self.transaction.as_ref().ok_or_else(|| {
+            TransactionError::NestedTransactionNotSupported("Transaction object does not support savepoints".into())
+        })
+    }
+}
+
+impl<D: TransactionDriver> TransactionExecution for DefaultTransactionStatus<D> {
+    fn transaction_name(&self) -> String {
+        self.transaction_name.clone().unwrap_or_default()
+    }
+    fn has_transaction(&self) -> bool {
+        self.transaction.is_some()
+    }
+    fn is_new_transaction(&self) -> bool {
+        self.has_transaction() && self.new_transaction
+    }
+    fn is_nested(&self) -> bool {
+        self.nested
+    }
+    fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+    fn set_rollback_only(&self) -> Result<(), TransactionError> {
+        if self.is_completed() {
+            return Err(TransactionError::IllegalState("Transaction completed".into()));
+        }
+        self.rollback_only.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    fn is_rollback_only(&self) -> bool {
+        self.is_local_rollback_only() || self.is_global_rollback_only()
+    }
+    fn is_completed(&self) -> bool {
+        self.completed.load(Ordering::SeqCst)
+    }
+}
+
+impl<D: TransactionDriver> SavepointManager for DefaultTransactionStatus<D> {
+    fn create_savepoint(&self) -> BoxFuture<'_, Result<Savepoint, TransactionError>> {
+        Box::pin(async move {
+            let savepoint = self.driver.create_savepoint(self.require_savepoint_transaction()?).await?;
+            TransactionSynchronizationUtils::trigger_savepoint(&savepoint).await?;
+            Ok(savepoint)
+        })
+    }
+    fn rollback_to_savepoint<'a>(&'a self, savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>> {
+        Box::pin(async move {
+            TransactionSynchronizationUtils::trigger_savepoint_rollback(savepoint).await?;
+            self.driver.rollback_to_savepoint(self.require_savepoint_transaction()?, savepoint).await
+        })
+    }
+    fn release_savepoint<'a>(&'a self, savepoint: &'a Savepoint) -> BoxFuture<'a, Result<(), TransactionError>> {
+        Box::pin(async move { self.driver.release_savepoint(self.require_savepoint_transaction()?, savepoint).await })
+    }
+}
+
+impl<D: TransactionDriver> TransactionStatus for DefaultTransactionStatus<D> {
+    fn has_savepoint(&self) -> bool {
+        self.held_savepoint().is_some()
+    }
+    fn flush(&self) -> BoxFuture<'_, Result<(), TransactionError>> {
+        Box::pin(async move {
+            match self.transaction.as_ref() {
+                Some(transaction) => self.driver.flush(transaction).await,
+                None => Ok(()),
+            }
+        })
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl<D: TransactionDriver> Drop for DefaultTransactionStatus<D> {
+    fn drop(&mut self) {
+        if !self.is_completed() && self.new_synchronization {
+            TransactionSynchronizationManager::clear();
+        }
+    }
+}
