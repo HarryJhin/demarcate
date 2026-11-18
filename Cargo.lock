@@ -143,11 +143,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "demarcate"
+version = "0.0.0"
+dependencies = [
+ "demarcate",
+ "demarcate-core",
+ "demarcate-interceptor",
+ "demarcate-macros",
+ "demarcate-sqlx",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "demarcate-core"
 version = "0.0.0"
 dependencies = [
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "demarcate-interceptor"
+version = "0.0.0"
+dependencies = [
+ "demarcate-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "demarcate-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

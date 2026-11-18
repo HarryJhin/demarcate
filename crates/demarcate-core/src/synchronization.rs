@@ -108,6 +108,12 @@ tokio::task_local! {
     static STATE: RefCell<State>;
 }
 
+const NO_CONTEXT: &str = "No transaction context is bound to the current task. Call this inside a \
+     #[transactional] function or TransactionTemplate::execute, or wrap the future in \
+     demarcate_core::synchronization::scope. A task created with tokio::spawn does not inherit the \
+     context of the task that spawned it; use demarcate_core::synchronization::spawn and open a new \
+     transaction inside it";
+
 fn read<R>(default: R, f: impl FnOnce(&State) -> R) -> R {
     STATE.try_with(|state| f(&state.borrow())).unwrap_or(default)
 }
@@ -115,7 +121,7 @@ fn read<R>(default: R, f: impl FnOnce(&State) -> R) -> R {
 fn write<R>(f: impl FnOnce(&mut State) -> Result<R, TransactionError>) -> Result<R, TransactionError> {
     STATE
         .try_with(|state| f(&mut state.borrow_mut()))
-        .unwrap_or_else(|_| Err(TransactionError::InvalidState("No transaction context bound to task".into())))
+        .unwrap_or_else(|_| Err(TransactionError::InvalidState(NO_CONTEXT.into())))
 }
 
 fn bind(state: &mut State, key: ResourceKey, value: BoundResource) -> Option<BoundResource> {
@@ -132,6 +138,14 @@ pub fn is_context_active() -> bool {
 
 pub async fn scope<F: Future>(future: F) -> F::Output {
     STATE.scope(RefCell::new(State::default()), future).await
+}
+
+pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(scope(future))
 }
 
 pub async fn ensure_scope<F: Future>(future: F) -> F::Output {

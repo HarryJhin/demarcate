@@ -162,6 +162,19 @@ impl TransactionalPool {
         self.bound_holder().is_some()
     }
 
+    pub async fn acquire_in_transaction(&self) -> Result<TransactionalConnection, TransactionError> {
+        if !self.bound_holder().is_some_and(|holder| holder.is_transaction_active()) {
+            return Err(TransactionError::NoTransaction(
+                "No transaction is active for this pool on the current task. acquire_in_transaction() must be \
+                 called inside a #[transactional] function or TransactionTemplate::execute that uses this \
+                 pool's transaction manager. A task created with tokio::spawn does not inherit the transaction; \
+                 open a new one inside the spawned task, or use acquire() to run without a transaction"
+                    .into(),
+            ));
+        }
+        self.acquire().await
+    }
+
     pub async fn acquire(&self) -> Result<TransactionalConnection, TransactionError> {
         if let Some(holder) = self.bound_holder() {
             holder.requested();

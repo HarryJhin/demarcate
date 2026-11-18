@@ -60,13 +60,13 @@ impl TransactionTemplate {
         F: FnOnce(Arc<dyn TransactionStatus>) -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        synchronization::ensure_scope(async {
+        Box::pin(synchronization::ensure_scope(async {
             let status = self
                 .transaction_manager
                 .transaction(Some(&self.definition))
                 .await
                 .map_err(TemplateError::Transaction)?;
-            match action(status.clone()).await {
+            match Box::pin(action(status.clone())).await {
                 Ok(value) => {
                     self.transaction_manager.commit(status.as_ref()).await.map_err(TemplateError::Transaction)?;
                     Ok(value)
@@ -79,7 +79,7 @@ impl TransactionTemplate {
                     }
                 },
             }
-        })
+        }))
         .await
     }
 }
