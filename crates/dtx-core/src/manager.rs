@@ -112,7 +112,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
     ) -> Result<Status<D>, TransactionError> {
         let defaults = TransactionDefinition::default();
         let def = definition.unwrap_or(&defaults);
-        let transaction = self.driver.transaction()?;
+        let transaction = self.driver.transaction(&self.settings)?;
 
         if self.driver.is_existing_transaction(&transaction) {
             return self.handle_existing_transaction(def, transaction).await;
@@ -234,7 +234,7 @@ impl<D: TransactionDriver> TransactionManager<D> {
         let status =
             self.new_transaction_status(definition, Some(transaction), true, new_synchronization, nested, suspended);
         self.notify(|listener| listener.before_begin(status.as_ref()));
-        let begun = self.driver.begin(status.transaction().expect("transaction present"), definition).await;
+        let begun = self.driver.begin(status.transaction().expect("transaction present"), definition, &self.settings).await;
         let prepared = match begun {
             Ok(()) => self.prepare_synchronization(&status, definition),
             Err(error) => Err(error),

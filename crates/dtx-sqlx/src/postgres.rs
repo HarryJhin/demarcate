@@ -380,7 +380,7 @@ impl TransactionDriver for PgTransactionDriver {
     type Transaction = PgTransactionObject;
     type Suspended = Arc<ConnectionHolder>;
 
-    fn transaction(&self) -> Result<Self::Transaction, TransactionError> {
+    fn transaction(&self, _settings: &ManagerSettings) -> Result<Self::Transaction, TransactionError> {
         Ok(PgTransactionObject {
             holder: Mutex::new(self.pool.bound_holder()),
             new_connection_holder: AtomicBool::new(false),
@@ -396,6 +396,7 @@ impl TransactionDriver for PgTransactionDriver {
         &self,
         transaction: &Self::Transaction,
         definition: &TransactionDefinition,
+        _settings: &ManagerSettings,
     ) -> Result<(), TransactionError> {
         let existing = transaction.holder();
         if let Some(holder) = &existing

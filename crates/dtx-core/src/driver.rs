@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::definition::TransactionDefinition;
 use crate::error::TransactionError;
+use crate::manager::ManagerSettings;
 use crate::status::Savepoint;
 use crate::synchronization::{self, CompletionStatus, TransactionSynchronization};
 
@@ -9,7 +10,7 @@ pub trait TransactionDriver: Send + Sync + 'static {
     type Transaction: Send + Sync + 'static;
     type Suspended: Send + 'static;
 
-    fn transaction(&self) -> Result<Self::Transaction, TransactionError>;
+    fn transaction(&self, settings: &ManagerSettings) -> Result<Self::Transaction, TransactionError>;
 
     fn is_existing_transaction(&self, _transaction: &Self::Transaction) -> bool {
         false
@@ -23,6 +24,7 @@ pub trait TransactionDriver: Send + Sync + 'static {
         &self,
         transaction: &Self::Transaction,
         definition: &TransactionDefinition,
+        settings: &ManagerSettings,
     ) -> impl Future<Output = Result<(), TransactionError>> + Send;
 
     fn suspend(

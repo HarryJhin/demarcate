@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dtx_core::{
-    PlatformTransactionManager, Propagation, SynchronizationMode, TemplateError, TransactionDefinition,
+    ManagerSettings, PlatformTransactionManager, Propagation, SynchronizationMode, TemplateError, TransactionDefinition,
     TransactionDriver, TransactionError, TransactionExecution, TransactionExecutionListener, TransactionManager,
     TransactionTemplate, synchronization,
 };
@@ -26,7 +26,7 @@ impl TransactionDriver for TestDriver {
     type Transaction = &'static str;
     type Suspended = ();
 
-    fn transaction(&self) -> Result<Self::Transaction, TransactionError> {
+    fn transaction(&self, _settings: &ManagerSettings) -> Result<Self::Transaction, TransactionError> {
         Ok("transaction")
     }
     fn is_existing_transaction(&self, _transaction: &Self::Transaction) -> bool {
@@ -36,6 +36,7 @@ impl TransactionDriver for TestDriver {
         &self,
         transaction: &Self::Transaction,
         _definition: &TransactionDefinition,
+        _settings: &ManagerSettings,
     ) -> Result<(), TransactionError> {
         assert_eq!(*transaction, "transaction");
         if !self.can_create_transaction {
