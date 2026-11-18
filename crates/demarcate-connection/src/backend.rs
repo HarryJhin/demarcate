@@ -8,9 +8,10 @@ use demarcate_core::{TransactionDefinition, TransactionError};
 /// call these functions; they hold the logic that is the same for every library.
 ///
 /// Note that a [`Connection`](ConnectionBackend::Connection) can be dropped while it runs a
-/// transaction: when a call is cancelled, and after a callback used the connection of a
-/// completed transaction. Dropping it must roll the transaction back or close the connection.
-/// It must not return a connection with an open transaction to a pool.
+/// transaction: for example when a call is cancelled, when a new transaction cannot be bound to
+/// the context, and after a callback used the connection of a completed transaction. Dropping it
+/// must roll the transaction back or close the connection. It must not return a connection with
+/// an open transaction to a pool.
 pub trait ConnectionBackend: Send + Sync + 'static {
     /// One connection: either in autocommit mode or running a transaction.
     type Connection: Send + 'static;
@@ -25,8 +26,11 @@ pub trait ConnectionBackend: Send + Sync + 'static {
     /// commit.
     const UNUSABLE_MESSAGE: &'static str;
 
-    /// Checks a definition before [`begin`](ConnectionBackend::begin). The default accepts every
-    /// definition.
+    /// Checks the definition of a new transaction before [`begin`](ConnectionBackend::begin). The
+    /// default accepts every definition.
+    ///
+    /// Note that `begin` is also called without this check, with the default definition, when a
+    /// callback uses the connection of a completed transaction.
     ///
     /// # Errors
     ///
@@ -63,8 +67,8 @@ pub trait ConnectionBackend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Limits the statements that follow on the connection to the remaining time of the
-    /// transaction. The default does nothing; the deadline is still checked whenever the
-    /// connection is handed out.
+    /// transaction. It is called each time a connection that runs a transaction with a deadline is
+    /// handed out. The default does nothing; the deadline itself is checked in every case.
     fn apply_timeout(
         &self,
         _connection: &mut Self::Connection,
@@ -80,10 +84,20 @@ pub trait ConnectionBackend: Send + Sync + 'static {
         false
     }
 
+    /// Returns whether the database rolled the whole transaction back when a statement failed
+    /// with this error, so that the connection is no longer in a transaction. The default is
+    /// `false`.
+    ///
+    /// The driver then refuses every further use of the connection in this transaction, because
+    /// a statement would run and commit on its own, and the transaction cannot commit.
+    fn ends_transaction(_error: &Self::Error) -> bool {
+        false
+    }
+
     /// Returns whether the transaction of the connection can still commit. Called before a commit
     /// when a statement failed with an error for which
-    /// [`taints_transaction`](ConnectionBackend::taints_transaction) is `true`. The default is
-    /// `true`.
+    /// [`taints_transaction`](ConnectionBackend::taints_transaction) is `true`, or when a savepoint
+    /// statement failed with any error. The default is `true`.
     fn is_usable(&self, _connection: &mut Self::Connection) -> impl Future<Output = bool> + Send {
         async { true }
     }

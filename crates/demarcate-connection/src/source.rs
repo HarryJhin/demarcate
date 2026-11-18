@@ -136,6 +136,7 @@ impl<B: ConnectionBackend> ConnectionSource<B> {
         let synchronized = synchronization::is_synchronization_active();
         if let Some(holder) = self.bound_holder() {
             holder.check_savepoint_owner()?;
+            holder.check_not_ended()?;
             let mut guard = match holder.lock() {
                 Ok(guard) => guard,
                 Err(_) if !holder.is_transaction_active() => {
@@ -216,10 +217,8 @@ impl<B: ConnectionBackend> ConnectionHandle<B> {
     /// Records the outcome of a statement that ran on this connection, so that a commit can detect
     /// a transaction that a failed statement left unable to commit.
     pub fn statement_finished(&self, error: Option<&B::Error>) {
-        if let Some(holder) = self.transaction_holder()
-            && error.is_some_and(B::taints_transaction)
-        {
-            holder.mark_aborted();
+        if let (Some(holder), Some(error)) = (self.transaction_holder(), error) {
+            holder.statement_failed(error);
         }
     }
 }

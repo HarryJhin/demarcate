@@ -6,20 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
-description = "sqlx transaction manager for demarcate: PostgreSQL driver and a transaction-aware pool"
+description = "sqlx transaction managers for demarcate: PostgreSQL, MySQL, MariaDB and SQLite drivers and a transaction-aware pool"
 keywords = ["transaction", "database", "spring", "async", "sqlx"]
 categories = ["database", "asynchronous"]
 
 [features]
 default = ["postgres"]
-postgres = [
+postgres = ["driver", "sqlx/postgres"]
+mysql = ["driver", "sqlx/mysql"]
+sqlite = ["driver", "sqlx/sqlite"]
+driver = [
     "dep:async-stream",
     "dep:demarcate-connection",
     "dep:demarcate-core",
     "dep:futures-core",
     "dep:futures-util",
     "dep:sqlx",
-    "sqlx/postgres",
     "sqlx/macros",
 ]
 

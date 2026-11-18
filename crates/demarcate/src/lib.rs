@@ -81,6 +81,12 @@ pub use demarcate_interceptor::{
 pub use demarcate_interceptor::{TransactionalReturn, assert_transactional_return};
 pub use demarcate_macros::transactional;
 
+/// The MySQL and MariaDB driver and the transaction-aware pool, through sqlx.
+#[cfg(feature = "sqlx-mysql")]
+pub use demarcate_sqlx::mysql;
 /// The PostgreSQL driver and the transaction-aware pool, through sqlx.
 #[cfg(feature = "sqlx-postgres")]
 pub use demarcate_sqlx::postgres;
+/// The SQLite driver and the transaction-aware pool, through sqlx.
+#[cfg(feature = "sqlx-sqlite")]
+pub use demarcate_sqlx::sqlite;

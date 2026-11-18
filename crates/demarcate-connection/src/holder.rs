@@ -55,6 +55,7 @@ pub struct ConnectionHolder<B: ConnectionBackend> {
     aborted_depth: Mutex<Option<usize>>,
     savepoints: Mutex<Vec<(String, Option<u64>)>>,
     transaction_active: AtomicBool,
+    ended: AtomicBool,
     deadline: Mutex<Option<Instant>>,
     savepoint_counter: AtomicU32,
     reference_count: AtomicUsize,
@@ -69,6 +70,7 @@ impl<B: ConnectionBackend> ConnectionHolder<B> {
             aborted_depth: Mutex::new(None),
             savepoints: Mutex::new(Vec::new()),
             transaction_active: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
             deadline: Mutex::new(None),
             savepoint_counter: AtomicU32::new(0),
             reference_count: AtomicUsize::new(0),
@@ -117,6 +119,34 @@ impl<B: ConnectionBackend> ConnectionHolder<B> {
         let depth = self.savepoints.lock().expect("savepoints lock").len();
         let mut aborted = self.aborted_depth.lock().expect("aborted lock");
         *aborted = Some(aborted.map_or(depth, |existing| existing.min(depth)));
+    }
+    /// Records that the database rolled the whole transaction back, so that the connection is no
+    /// longer in a transaction. Every further use of the connection in this transaction is refused,
+    /// and the transaction is marked rollback-only.
+    pub fn mark_ended(&self) {
+        self.ended.store(true, Ordering::SeqCst);
+        self.set_rollback_only_for_good();
+    }
+    /// Records the failure of a statement that ran on the connection of this transaction, as the
+    /// backend classifies the error.
+    pub fn statement_failed(&self, error: &B::Error) {
+        if B::ends_transaction(error) {
+            self.mark_ended();
+        } else if B::taints_transaction(error) {
+            self.mark_aborted();
+        }
+    }
+    pub(crate) fn check_not_ended(&self) -> Result<(), TransactionError> {
+        if self.ended.load(Ordering::SeqCst) {
+            return Err(TransactionError::InvalidState(
+                "The database rolled back the transaction of this connection when a statement failed, for \
+                 example because of a deadlock. A statement that follows would run outside the transaction \
+                 and commit on its own, so the connection refuses it. Return the error from the transactional \
+                 function"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
     pub(crate) fn is_aborted(&self) -> bool {
         self.aborted_depth.lock().expect("aborted lock").is_some()
@@ -214,6 +244,7 @@ impl<B: ConnectionBackend> ConnectionHolder<B> {
         self.savepoints.lock().expect("savepoints lock").clear();
         *self.deadline.lock().expect("deadline lock") = None;
         self.set_transaction_active(false);
+        self.ended.store(false, Ordering::SeqCst);
         self.savepoint_counter.store(0, Ordering::SeqCst);
     }
     fn try_lease(&self) -> Option<Lease<B::Connection>> {

@@ -57,8 +57,39 @@ transaction. `audit` runs in its own transaction and commits even when
 
 ## Status
 
-Version 0.1 is the first release. The API can change before 1.0. Only
-PostgreSQL through sqlx is implemented.
+Version 0.1 is the first release. The API can change before 1.0. The
+drivers are for sqlx with PostgreSQL, MySQL, MariaDB and SQLite.
+
+## Setup
+
+demarcate is not on crates.io yet. Depend on a release tag of this
+repository:
+
+```toml
+[dependencies]
+demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.1.0", features = ["sqlx-postgres"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
+```
+
+## Compatibility
+
+| | Supported | Checked by the CI |
+|:--|:--|:--|
+| Rust | 1.94 and later; sqlx 0.9 requires 1.94 | 1.94 and the current stable release |
+| sqlx | 0.9.1 and later 0.9 releases | 0.9.1, and weekly the newest release |
+| tokio | 1.38 and later | 1.38, and weekly the newest release |
+| PostgreSQL | not limited | 18 |
+| MySQL | not limited | 8.4 |
+| MariaDB | not limited | 11 |
+| SQLite | the version that sqlx bundles | that version |
+
+One CI job builds and tests with the lowest version of every direct
+dependency that `Cargo.toml` allows. A weekly job does the same with the
+newest versions.
+
+The same conformance tests run on every database. Where a database behaves
+differently, the tests assert that behaviour, and the section "Databases"
+lists it.
 
 ## Setup
 
@@ -205,6 +236,30 @@ savepoints.
   of a Tokio worker thread in a debug build.
 - JTA, XML configuration and the reactive variant are not ported.
 
+## Databases
+
+Enable one feature for each database: `sqlx-postgres`, `sqlx-mysql` (MySQL
+and MariaDB) or `sqlx-sqlite`. The modules `demarcate::postgres`,
+`demarcate::mysql` and `demarcate::sqlite` have the same items.
+
+| | PostgreSQL | MySQL, MariaDB | SQLite |
+|:--|:--|:--|:--|
+| `read_only` | the server rejects a write | the server rejects a write | not enforced |
+| `isolation` | all four levels | all four levels | `Default` and `Serializable`; another level is an error |
+| `timeout` | checked before each query, and the server cancels a running statement | checked before each query | checked before each query |
+| A statement fails and the function returns `Ok` | the commit returns `UnexpectedRollback` | the other statements commit | the other statements commit |
+| `RequiresNew` that writes after its caller wrote | commits on its own | commits on its own | fails with `database is locked` |
+| Schema statements (`CREATE TABLE`) | are part of the transaction | commit the transaction on the server | are part of the transaction |
+
+MySQL and MariaDB roll the whole transaction back when a statement fails
+with a deadlock (SQLSTATE `40001`), and the connection then runs in
+autocommit mode. After that error, every further query of the transaction
+through `TransactionalPool` returns an error and does not run, and the
+transaction cannot commit.
+
+SQLite allows one writer at a time. Use the WAL journal mode, so that
+readers and the writer do not block each other.
+
 ## Checks that move to run time
 
 Passing a transaction handle lets the compiler check that a function
@@ -229,7 +284,7 @@ loud:
 | `demarcate-connection` | the transaction driver for connection libraries: connection holder, savepoints, the `ConnectionBackend` trait |
 | `demarcate-interceptor` | transaction attribute, rollback rules, invocation flow, registry |
 | `demarcate-macros` | `#[transactional]` |
-| `demarcate-sqlx` | sqlx driver for PostgreSQL, `TransactionalPool` |
+| `demarcate-sqlx` | sqlx drivers for PostgreSQL, MySQL, MariaDB and SQLite, `TransactionalPool` |
 
 A driver for another connection library implements `ConnectionBackend`
 from `demarcate-connection`: how to obtain a connection, begin, commit,
@@ -240,10 +295,15 @@ connection implements `TransactionDriver` from `demarcate-core`.
 
 ```sh
 cargo test
-DEMARCATE_TEST_DATABASE_URL=postgres://... cargo test -- --include-ignored
+DEMARCATE_TEST_DATABASE_URL=postgres://... \
+DEMARCATE_TEST_MYSQL_URL=mysql://... \
+DEMARCATE_TEST_MARIADB_URL=mysql://... \
+  cargo test -- --include-ignored
 ```
 
-The second command runs the PostgreSQL tests.
+The first command runs the tests that need no server, the SQLite tests
+included. The second command also runs the PostgreSQL, MySQL and MariaDB
+tests.
 
 ## License
 

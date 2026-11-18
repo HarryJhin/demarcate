@@ -13,6 +13,8 @@ categories = ["database", "asynchronous"]
 [features]
 default = []
 sqlx-postgres = ["dep:demarcate-sqlx", "demarcate-sqlx/postgres"]
+sqlx-mysql = ["dep:demarcate-sqlx", "demarcate-sqlx/mysql"]
+sqlx-sqlite = ["dep:demarcate-sqlx", "demarcate-sqlx/sqlite"]
 
 [dependencies]
 demarcate-connection = { path = "../demarcate-connection", version = "0.1.0" }
@@ -22,7 +24,7 @@ demarcate-macros = { path = "../demarcate-macros", version = "0.1.0" }
 demarcate-sqlx = { path = "../demarcate-sqlx", version = "0.1.0", optional = true, default-features = false }
 
 [dev-dependencies]
-demarcate = { path = ".", features = ["sqlx-postgres"] }
+demarcate = { path = ".", features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sqlite"] }
 futures-util = "0.3.32"
-sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "postgres"] }
+sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "postgres", "mysql", "sqlite"] }
 tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "time"] }

@@ -83,6 +83,7 @@ impl<B: ConnectionBackend> ConnectionDriver<B> {
     ) -> Result<(), SavepointError<B::Error>> {
         synchronization::check_access().map_err(SavepointError::State)?;
         holder.check_savepoint_owner().map_err(SavepointError::State)?;
+        holder.check_not_ended().map_err(SavepointError::State)?;
         let mut guard = holder.lock().map_err(SavepointError::State)?;
         let connection = guard.as_mut().ok_or_else(|| {
             SavepointError::State(TransactionError::Usage(
@@ -94,7 +95,11 @@ impl<B: ConnectionBackend> ConnectionDriver<B> {
         match self.source.backend().execute(connection, &statement).await {
             Ok(()) => Ok(()),
             Err(error) => {
-                holder.mark_aborted();
+                if B::ends_transaction(&error) {
+                    holder.mark_ended();
+                } else {
+                    holder.mark_aborted();
+                }
                 Err(SavepointError::Backend(error))
             }
         }
