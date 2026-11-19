@@ -17,24 +17,15 @@ git_release_enable = true
 git_release_name = "v{{ version }}"
 changelog_update = true
 changelog_path = "./CHANGELOG.md"
-changelog_include = ["demarcate-core", "demarcate-interceptor", "demarcate-macros", "demarcate-sqlx"]
+changelog_include = ["demarcate-connection", "demarcate-core", "demarcate-diesel-async", "demarcate-interceptor", "demarcate-macros", "demarcate-sea-orm", "demarcate-sqlx", "demarcate-tokio-postgres"]
 
 # release-plz reads every package from the commit of its latest release tag, and fails when the
-# package does not exist there. A package that is newer than the latest tag needs a tag name that
-# matches no tag, so release-plz treats it as an initial release. Move the package into
-# `changelog_include` and delete its entry after the first release that contains it.
-[[package]]
-name = "demarcate-connection"
-git_tag_name = "demarcate-connection-v{{ version }}"
-
-[[package]]
-name = "demarcate-diesel-async"
-git_tag_name = "demarcate-diesel-async-v{{ version }}"
-
-[[package]]
-name = "demarcate-sea-orm"
-git_tag_name = "demarcate-sea-orm-v{{ version }}"
-
-[[package]]
-name = "demarcate-tokio-postgres"
-git_tag_name = "demarcate-tokio-postgres-v{{ version }}"
+# package does not exist there. A package that is newer than the latest tag needs an entry of
+# its own with a tag name that matches no tag, so release-plz treats it as an initial release:
+#
+#   [[package]]
+#   name = "demarcate-new"
+#   git_tag_name = "demarcate-new-v{{ version }}"
+#
+# After the first release that contains the package, delete the entry and add the package to
+# `changelog_include`.
