@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use demarcate::postgres::{TransactionalPool, manager};
+use demarcate::postgres::TransactionalPool;
 use demarcate::transactional;
 
 #[derive(Debug)]
@@ -30,6 +28,8 @@ impl std::fmt::Display for Error {
     }
 }
 
+impl std::error::Error for Error {}
+
 struct Orders {
     pool: TransactionalPool,
 }
@@ -54,14 +54,11 @@ impl Orders {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pg_pool = sqlx::PgPool::connect(&url).await?;
-    sqlx::query("create table if not exists quickstart_orders(item text)").execute(&pg_pool).await?;
-    sqlx::query("create table if not exists quickstart_audit(event text)").execute(&pg_pool).await?;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = demarcate::postgres::install_from_env().await?;
+    sqlx::query("create table if not exists quickstart_orders(item text)").execute(&pool).await?;
+    sqlx::query("create table if not exists quickstart_audit(event text)").execute(&pool).await?;
 
-    let pool = TransactionalPool::new(pg_pool);
-    demarcate::registry().set_default(Arc::new(manager(pool.clone())));
-
-    Orders { pool }.place("book").await
+    Orders { pool }.place("book").await?;
+    Ok(())
 }

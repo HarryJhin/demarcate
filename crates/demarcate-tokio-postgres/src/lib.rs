@@ -163,6 +163,12 @@ pub struct TransactionalPool {
     source: ConnectionSource<TokioPostgresBackend>,
 }
 
+impl From<Pool> for TransactionalPool {
+    fn from(pool: Pool) -> Self {
+        Self::new(pool)
+    }
+}
+
 impl std::fmt::Debug for TransactionalPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TransactionalPool")

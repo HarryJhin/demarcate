@@ -44,6 +44,9 @@ DATABASE_URL=postgres://postgres:orders@localhost/postgres \
   cargo run --manifest-path examples/axum-orders/Cargo.toml
 ```
 
+The pool has the default size of sqlx, 10 connections. Set
+`DATABASE_MAX_CONNECTIONS` for another size.
+
 The server runs the migrations on start. They create the tables, two
 products (`BOOK`, `PEN`) and one coupon (`WELCOME`).
 
@@ -88,8 +91,10 @@ demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.2.0", fe
 
 When you copy this structure:
 
-- Register the transaction manager once at startup, before the first
-  request. The registry is global to the process.
+- Install the transaction manager once at startup, before the first
+  request: `demarcate::postgres::install_from_env()` in `src/main.rs`
+  connects the pool from `DATABASE_URL` and registers the manager. The
+  registry is global to the process.
 - A `RequiresNew` function takes a second connection while its caller keeps
   the first. Keep the number of concurrent requests at or below half the
   pool size, as `src/main.rs` does. Otherwise a request fails when the pool

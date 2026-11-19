@@ -71,16 +71,43 @@ demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.2.0", fe
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 ```
 
-Register a transaction manager once at startup:
+Install the transaction manager once at startup. `install_from_env` reads
+`DATABASE_URL`, connects the pool, creates the transaction manager, and
+registers it for every `#[transactional]` function:
 
 ```rust
-use std::sync::Arc;
-use demarcate::postgres::{TransactionalPool, manager};
-
-let pg_pool = sqlx::PgPool::connect(&database_url).await?;
-let pool = TransactionalPool::new(pg_pool);
-demarcate::registry().set_default(Arc::new(manager(pool.clone())));
+let pool = demarcate::postgres::install_from_env().await?;
 ```
+
+Give `pool` to the data access code. The optional variables are
+`DATABASE_MAX_CONNECTIONS`, `DATABASE_MIN_CONNECTIONS`,
+`DATABASE_ACQUIRE_TIMEOUT_SECONDS`, `DATABASE_IDLE_TIMEOUT_SECONDS` and
+`DATABASE_TRANSACTION_TIMEOUT_SECONDS`, the timeout of a transaction that
+declares none.
+
+There are three levels, and each one shows more of the wiring:
+
+| Call | What you provide | What it does |
+|:--|:--|:--|
+| `install_from_env()` | environment variables | connects the pool, creates and registers the manager |
+| `install_from(&settings)` | a `PoolSettings` value from code, or from your own configuration with `PoolSettings::from_lookup` | the same |
+| `install(pool)` | a pool that you built with every option of the connection library | creates and registers the manager |
+
+A second database gets a name: `install_as("reporting", pool)` or
+`install_from_as("reporting", &settings)`, and
+`#[transactional(transaction_manager = "reporting")]` on its functions.
+Installing a second manager in a place that is taken is an error, because
+it would move the functions of the first database to the second one.
+
+The module of each driver has these functions: `demarcate::postgres`,
+`mysql`, `sqlite`, `sea_orm`, `tokio_postgres`, `diesel_async::postgres`
+and `diesel_async::mysql`. The tokio-postgres and diesel-async modules
+have `install` and `install_as` only, so build that pool yourself. For
+PostgreSQL, these libraries take the TLS setup as code and not from the
+URL: a pool that is built from the URL alone connects without TLS.
+
+To do the wiring yourself, create the manager with `manager(pool)` and
+register it with `demarcate::registry()`.
 
 A `#[transactional]` function is an `async fn` that returns `Result<T, E>`
 where `E: From<demarcate::TransactionError>`, because beginning, committing

@@ -262,6 +262,12 @@ macro_rules! diesel_driver {
             }
         }
 
+        impl From<Pool<$connection>> for TransactionalPool {
+            fn from(pool: Pool<$connection>) -> Self {
+                Self::new(pool)
+            }
+        }
+
         impl fmt::Debug for TransactionalPool {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.debug_struct("TransactionalPool")
