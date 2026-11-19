@@ -264,7 +264,8 @@ pub type TokioPostgresTransactionManager = TransactionManager<TokioPostgresTrans
 
 /// Creates a transaction manager for the given pool, with nested transactions allowed.
 ///
-/// Register it once at startup:
+/// The `install` function of this module in the `demarcate` crate creates and registers it in
+/// one call. Call this function to register the manager yourself:
 /// `demarcate::registry().set_default(Arc::new(manager(pool.clone())))`.
 pub fn manager(pool: TransactionalPool) -> TokioPostgresTransactionManager {
     demarcate_connection::manager(pool.source)

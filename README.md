@@ -67,7 +67,7 @@ repository:
 
 ```toml
 [dependencies]
-demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.2.0", features = ["sqlx-postgres"] }
+demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.2.1", features = ["sqlx-postgres"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 ```
 
@@ -97,14 +97,17 @@ A second database gets a name: `install_as("reporting", pool)` or
 `install_from_as("reporting", &settings)`, and
 `#[transactional(transaction_manager = "reporting")]` on its functions.
 Installing a second manager in a place that is taken is an error, because
-it would move the functions of the first database to the second one.
+it would move the functions of the first database to the second one. Only
+the install functions refuse: `set_default` and `register` of the registry
+replace the manager that is there.
 
 The module of each driver has these functions: `demarcate::postgres`,
 `mysql`, `sqlite`, `sea_orm`, `tokio_postgres`, `diesel_async::postgres`
 and `diesel_async::mysql`. The tokio-postgres and diesel-async modules
 have `install` and `install_as` only, so build that pool yourself. For
-PostgreSQL, these libraries take the TLS setup as code and not from the
-URL: a pool that is built from the URL alone connects without TLS.
+PostgreSQL, these libraries take the TLS connector as code: deadpool-postgres
+as an argument of its manager, and diesel-async in a custom setup function.
+A URL cannot turn TLS on there.
 
 To do the wiring yourself, create the manager with `manager(pool)` and
 register it with `demarcate::registry()`.

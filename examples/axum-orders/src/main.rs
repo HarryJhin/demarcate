@@ -1,3 +1,4 @@
+use demarcate::connection::PoolSettings;
 use demarcate_example_axum_orders::notification::Notifier;
 use demarcate_example_axum_orders::{http, migrate, order_service};
 use tokio::sync::broadcast::error::RecvError;
@@ -7,9 +8,7 @@ use tower::limit::GlobalConcurrencyLimitLayer;
 // `RequiresNew` audit entry. The server therefore handles at most half as many requests at a
 // time as the pool has connections; further requests wait for a free slot. The limit is one
 // for all routes together.
-fn max_concurrent_requests(max_connections: u32) -> usize {
-    (max_connections / 2).max(1) as usize
-}
+const DEFAULT_MAX_CONNECTIONS: u32 = 20;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,9 +16,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let address = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
 
-    let pool = demarcate::postgres::install_from_env().await?;
+    let settings = PoolSettings::from_env()?;
+    let max_connections = settings.get_max_connections().unwrap_or(DEFAULT_MAX_CONNECTIONS);
+    if max_connections < 2 {
+        return Err("DATABASE_MAX_CONNECTIONS must be at least 2: placing an order uses two connections".into());
+    }
+    let concurrent_requests = (max_connections / 2) as usize;
+
+    let pool = demarcate::postgres::install_from(&settings.max_connections(max_connections)).await?;
     migrate(pool.inner()).await?;
-    let concurrent_requests = max_concurrent_requests(pool.inner().options().get_max_connections());
 
     let notifier = Notifier::new();
     let mut placed = notifier.subscribe();

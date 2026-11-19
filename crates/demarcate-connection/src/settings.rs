@@ -9,11 +9,18 @@ pub fn default_manager_settings() -> ManagerSettings {
     ManagerSettings { nested_transaction_allowed: true, ..ManagerSettings::default() }
 }
 
+const MAX_CONNECTIONS: u32 = 100_000;
+const MAX_SECONDS: u32 = 365 * 24 * 60 * 60;
+
 /// The settings of one connection pool and of its transaction manager.
 ///
 /// Create them in code with [`new`](PoolSettings::new), or read them from the environment with
 /// [`from_env`](PoolSettings::from_env). A setting that is not given keeps the default of the
 /// connection library.
+///
+/// The values that are set in code are not checked: they go to the connection library as they
+/// are, and a value that the library does not accept, such as a pool of zero connections, fails
+/// there.
 ///
 /// The `Debug` output does not contain the URL, because a URL can contain a password.
 #[derive(Clone, PartialEq, Eq)]
@@ -65,9 +72,11 @@ impl PoolSettings {
     ///
     /// # Errors
     ///
-    /// Returns an error when `DATABASE_URL` is not set or empty, and when another variable is set
-    /// to a value that is not a whole number greater than zero. `DATABASE_MIN_CONNECTIONS` can be
-    /// zero. The error names the variable and never contains its value.
+    /// Returns an error when `DATABASE_URL` is not set, is empty or is not Unicode. Returns an error
+    /// when a number of connections is not a whole number from 1 to 100000
+    /// (`DATABASE_MIN_CONNECTIONS` can be 0), and when a number of seconds is not a whole number
+    /// from 1 to 31536000, one year. An optional variable that is empty counts as not set. The
+    /// error names the variable and never contains its value.
     pub fn from_env() -> Result<Self, SettingsError> {
         Self::from_lookup("", |name| std::env::var(name).ok())
     }
@@ -101,23 +110,18 @@ impl PoolSettings {
             let value = lookup(&variable).map(|value| value.trim().to_owned()).filter(|value| !value.is_empty());
             (variable, value)
         };
-        let number = |suffix: &str, minimum: u64| -> Result<Option<u64>, SettingsError> {
+        let number = |suffix: &str, minimum: u32, maximum: u32| -> Result<Option<u32>, SettingsError> {
             let (variable, value) = value(suffix);
             let Some(value) = value else { return Ok(None) };
-            match value.parse::<u64>() {
-                Ok(number) if number >= minimum => Ok(Some(number)),
-                _ => Err(SettingsError::Invalid { variable, minimum }),
+            match value.parse::<u32>() {
+                Ok(number) if (minimum..=maximum).contains(&number) => Ok(Some(number)),
+                _ => Err(SettingsError::Invalid { variable, minimum, maximum }),
             }
         };
-        let connections = |suffix: &str, minimum: u64| -> Result<Option<u32>, SettingsError> {
-            match number(suffix, minimum)? {
-                None => Ok(None),
-                Some(number) => u32::try_from(number)
-                    .map(Some)
-                    .map_err(|_| SettingsError::Invalid { variable: name(suffix), minimum }),
-            }
+        let connections = |suffix: &str, minimum: u32| number(suffix, minimum, MAX_CONNECTIONS);
+        let seconds = |suffix: &str| {
+            number(suffix, 1, MAX_SECONDS).map(|seconds| seconds.map(|seconds| Duration::from_secs(seconds.into())))
         };
-        let seconds = |suffix: &str| number(suffix, 1).map(|seconds| seconds.map(Duration::from_secs));
 
         let (url_variable, url) = value("URL");
         let url = url.ok_or(SettingsError::Missing { variable: url_variable })?;
@@ -217,7 +221,9 @@ pub enum SettingsError {
         /// The name of the variable.
         variable: String,
         /// The smallest value that is allowed.
-        minimum: u64,
+        minimum: u32,
+        /// The largest value that is allowed.
+        maximum: u32,
     },
 }
 
@@ -225,8 +231,8 @@ impl fmt::Display for SettingsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Missing { variable } => write!(f, "{variable} must be set"),
-            Self::Invalid { variable, minimum } => {
-                write!(f, "{variable} must be a whole number that is at least {minimum}")
+            Self::Invalid { variable, minimum, maximum } => {
+                write!(f, "{variable} must be a whole number from {minimum} to {maximum}")
             }
         }
     }
@@ -294,21 +300,41 @@ mod tests {
 
     #[test]
     fn a_value_that_is_not_an_allowed_number_is_rejected() {
-        for (variable, value, minimum) in [
-            ("DATABASE_MAX_CONNECTIONS", "0", 1),
-            ("DATABASE_MAX_CONNECTIONS", "many", 1),
-            ("DATABASE_MAX_CONNECTIONS", "4294967296", 1),
-            ("DATABASE_MIN_CONNECTIONS", "-1", 0),
-            ("DATABASE_ACQUIRE_TIMEOUT_SECONDS", "0", 1),
-            ("DATABASE_IDLE_TIMEOUT_SECONDS", "1.5", 1),
-            ("DATABASE_TRANSACTION_TIMEOUT_SECONDS", "30s", 1),
+        for (variable, value, minimum, maximum) in [
+            ("DATABASE_MAX_CONNECTIONS", "0", 1, 100_000),
+            ("DATABASE_MAX_CONNECTIONS", "many", 1, 100_000),
+            ("DATABASE_MAX_CONNECTIONS", "100001", 1, 100_000),
+            ("DATABASE_MIN_CONNECTIONS", "-1", 0, 100_000),
+            ("DATABASE_ACQUIRE_TIMEOUT_SECONDS", "0", 1, 31_536_000),
+            ("DATABASE_ACQUIRE_TIMEOUT_SECONDS", "18446744073709551615", 1, 31_536_000),
+            ("DATABASE_IDLE_TIMEOUT_SECONDS", "1.5", 1, 31_536_000),
+            ("DATABASE_TRANSACTION_TIMEOUT_SECONDS", "30s", 1, 31_536_000),
+            ("DATABASE_TRANSACTION_TIMEOUT_SECONDS", "31536001", 1, 31_536_000),
         ] {
             assert_eq!(
                 read("", &[("DATABASE_URL", "postgres://db/orders"), (variable, value)]),
-                Err(SettingsError::Invalid { variable: variable.into(), minimum }),
+                Err(SettingsError::Invalid { variable: variable.into(), minimum, maximum }),
                 "{variable}={value}"
             );
         }
+    }
+
+    #[test]
+    fn the_largest_values_are_accepted_and_an_empty_optional_variable_is_not_set() {
+        let settings = read(
+            "",
+            &[
+                ("DATABASE_URL", "postgres://db/orders"),
+                ("DATABASE_MAX_CONNECTIONS", "100000"),
+                ("DATABASE_MIN_CONNECTIONS", " "),
+                ("DATABASE_TRANSACTION_TIMEOUT_SECONDS", "31536000"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(settings.get_max_connections(), Some(100_000));
+        assert_eq!(settings.get_min_connections(), None);
+        assert_eq!(settings.get_transaction_timeout(), Some(Duration::from_secs(31_536_000)));
     }
 
     #[test]

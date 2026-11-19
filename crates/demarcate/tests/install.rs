@@ -94,6 +94,10 @@ async fn install_as_registers_a_manager_for_the_functions_that_name_it() {
     );
     service.add("later", false).await.unwrap();
     assert_eq!(notes(&raw).await, ["kept", "later"]);
+
+    for empty in ["", "  "] {
+        assert_eq!(demarcate::sqlite::install_as(empty, raw.clone()).map(|_| ()), Err(InstallError::EmptyName));
+    }
 }
 
 struct Wrapped {
@@ -288,9 +292,14 @@ async fn install_as_registers_the_pools_that_connect_later() {
     );
 }
 
-fn assert_hides_the_password<E: std::fmt::Debug + std::fmt::Display>(driver: &str, error: SetupError<E>) {
+fn assert_hides_the_password<E: std::error::Error + 'static>(driver: &str, error: SetupError<E>) {
     assert!(matches!(error, SetupError::Connect(_)), "{driver}: {error}");
-    let text = format!("{error} {error:?}");
+    let mut text = format!("{error} {error:?}");
+    let mut source = std::error::Error::source(&error);
+    while let Some(error) = source {
+        text.push_str(&format!(" {error} {error:?}"));
+        source = error.source();
+    }
     assert!(!text.contains(PASSWORD), "{driver}: {text}");
 }
 
@@ -315,8 +324,33 @@ async fn a_failed_connection_does_not_print_the_password() {
         assert_hides_the_password("sea-orm", error);
     }
 
+    let empty = demarcate::sea_orm::install_from_as("install-unreachable", &PoolSettings::new("")).await;
+    assert!(
+        matches!(&empty, Err(SetupError::Connect(error)) if !error.to_string().contains("<database url>")),
+        "{:?}",
+        empty.map(|_| ())
+    );
+
     let raw = sqlite("after-unreachable").await;
     assert!(demarcate::sqlite::install_as("install-unreachable", raw).is_ok());
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL: set DEMARCATE_TEST_DATABASE_URL and pass --include-ignored"]
+async fn a_rejected_login_does_not_print_the_password() {
+    let url = std::env::var("DEMARCATE_TEST_DATABASE_URL").expect("DEMARCATE_TEST_DATABASE_URL must be set");
+    let address = url.rsplit_once('@').expect("a URL with a user").1;
+    let wrong = |option: &str| {
+        PoolSettings::new(format!("postgres://postgres:{PASSWORD}@{address}{option}"))
+            .acquire_timeout(Duration::from_secs(5))
+    };
+
+    for settings in [wrong(""), wrong("?sslmode=not-a-mode")] {
+        let error = demarcate::postgres::install_from_as("install-rejected", &settings).await.map(|_| ()).unwrap_err();
+        assert_hides_the_password("sqlx postgres", error);
+        let error = demarcate::sea_orm::install_from_as("install-rejected", &settings).await.map(|_| ()).unwrap_err();
+        assert_hides_the_password("sea-orm", error);
+    }
 }
 
 const CHILD: &str = "DEMARCATE_INSTALL_TEST_CHILD";

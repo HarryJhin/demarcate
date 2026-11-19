@@ -13,6 +13,8 @@ pub enum InstallError {
     DefaultAlreadyInstalled,
     /// A transaction manager is already installed under this name.
     NameAlreadyInstalled(String),
+    /// The name is empty. A function with an empty `transaction_manager` uses the default manager.
+    EmptyName,
 }
 
 impl fmt::Display for InstallError {
@@ -26,6 +28,9 @@ impl fmt::Display for InstallError {
             Self::NameAlreadyInstalled(name) => {
                 write!(f, "A transaction manager is already installed under the name '{name}'")
             }
+            Self::EmptyName => f.write_str(
+                "The name of a transaction manager must not be empty. Install the default manager with install",
+            ),
         }
     }
 }
@@ -92,6 +97,7 @@ pub(crate) fn register(
     let registry = demarcate_interceptor::registry();
     match name {
         None => registry.set_default_if_absent(manager).then_some(()).ok_or(InstallError::DefaultAlreadyInstalled),
+        Some(name) if name.trim().is_empty() => Err(InstallError::EmptyName),
         Some(name) => registry
             .register_if_absent(name, manager)
             .then_some(())
@@ -128,7 +134,8 @@ macro_rules! install_functions {
         ///
         /// # Errors
         ///
-        /// Returns an error when a manager is already installed under the name.
+        /// Returns an error when a manager is already installed under the name, and when the name
+        /// is empty.
         pub fn install_as(name: &str, pool: impl Into<$pool>) -> Result<$pool, $crate::InstallError> {
             install_manager(Some(name), pool.into(), $crate::connection::default_manager_settings())
         }
@@ -176,7 +183,7 @@ macro_rules! install_functions {
         /// manager as the default manager.
         ///
         /// The variables are those of
-        /// [`PoolSettings::from_env`]($crate::connection::PoolSettings::from_env): `DATABASE_URL` and
+        /// [`PoolSettings::from_env`](crate::connection::PoolSettings::from_env): `DATABASE_URL` and
         /// the optional `DATABASE_MAX_CONNECTIONS`, `DATABASE_MIN_CONNECTIONS`,
         /// `DATABASE_ACQUIRE_TIMEOUT_SECONDS`, `DATABASE_IDLE_TIMEOUT_SECONDS` and
         /// `DATABASE_TRANSACTION_TIMEOUT_SECONDS`.

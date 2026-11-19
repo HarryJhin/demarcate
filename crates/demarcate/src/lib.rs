@@ -48,7 +48,8 @@
 //! Give the returned pool to the data access code. `install_from` takes a
 //! [`PoolSettings`](connection::PoolSettings) value instead of the environment, and `install_as`
 //! and `install_from_as` install the manager of a second database under a name for
-//! `#[transactional(transaction_manager = "name")]`. To do the wiring yourself, create the
+//! `#[transactional(transaction_manager = "name")]`. The tokio-postgres and diesel-async modules
+//! have `install` and `install_as` only. To do the wiring yourself, create the
 //! manager with `manager(pool)` and register it with [`registry`].
 //!
 //! The error type of a transactional function implements `From<TransactionError>`, because

@@ -229,7 +229,8 @@ pub struct TransactionalDatabase {
 /// URL of the database.
 ///
 /// SeaORM puts the URL into the message of some connection errors, and a URL can contain a
-/// password.
+/// password. The message can still name the user and the database, as the error of the server
+/// does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectError {
     message: String,
@@ -237,7 +238,8 @@ pub struct ConnectError {
 
 impl ConnectError {
     fn new(error: &DbErr, url: &str) -> Self {
-        Self { message: error.to_string().replace(url, "<database url>") }
+        let message = error.to_string();
+        Self { message: if url.is_empty() { message } else { message.replace(url, "<database url>") } }
     }
 }
 
@@ -285,6 +287,9 @@ impl TransactionalDatabase {
     ///
     /// A setting that is not given keeps the default of SeaORM. The transaction timeout of the
     /// settings belongs to the transaction manager and is not used here.
+    ///
+    /// SeaORM records its connect options, with the URL, in a `tracing` span at the trace level.
+    /// Do not collect the trace level of `sea_orm` where the URL must stay secret.
     ///
     /// # Errors
     ///
@@ -455,7 +460,8 @@ pub type SeaOrmTransactionManager = TransactionManager<SeaOrmTransactionDriver>;
 
 /// Creates a transaction manager for the given connection, with nested transactions allowed.
 ///
-/// Register it once at startup:
+/// The `install` function of this module in the `demarcate` crate creates and registers it in
+/// one call. Call this function to register the manager yourself:
 /// `demarcate::registry().set_default(Arc::new(manager(database.clone())))`.
 pub fn manager(database: TransactionalDatabase) -> SeaOrmTransactionManager {
     demarcate_connection::manager(database.source)
