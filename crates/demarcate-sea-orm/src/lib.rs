@@ -225,6 +225,38 @@ pub struct TransactionalDatabase {
     backend: DbBackend,
 }
 
+/// The error of [`TransactionalDatabase::connect`]: the message of the SeaORM error, without the
+/// URL of the database.
+///
+/// SeaORM puts the URL into the message of some connection errors, and a URL can contain a
+/// password. The message can still name the user and the database, as the error of the server
+/// does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectError {
+    message: String,
+}
+
+impl ConnectError {
+    fn new(error: &DbErr, url: &str) -> Self {
+        let message = error.to_string();
+        Self { message: if url.is_empty() { message } else { message.replace(url, "<database url>") } }
+    }
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ConnectError {}
+
+impl From<DatabaseConnection> for TransactionalDatabase {
+    fn from(connection: DatabaseConnection) -> Self {
+        Self::new(connection)
+    }
+}
+
 /// Returns the error of the transaction infrastructure that a query through
 /// [`TransactionalDatabase`] failed with, or `None` when the error has another cause.
 pub fn transaction_error(error: &DbErr) -> Option<&TransactionError> {
@@ -249,6 +281,37 @@ impl TransactionalDatabase {
     pub fn new(connection: DatabaseConnection) -> Self {
         let backend = connection.get_database_backend();
         Self { source: ConnectionSource::new(SeaOrmBackend { connection }), backend }
+    }
+
+    /// Connects a SeaORM connection with the given settings and wraps it.
+    ///
+    /// A setting that is not given keeps the default of SeaORM. The transaction timeout of the
+    /// settings belongs to the transaction manager and is not used here.
+    ///
+    /// SeaORM records its connect options, with the URL, in a `tracing` span at the trace level.
+    /// Do not collect the trace level of `sea_orm` where the URL must stay secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the URL is not valid or the database cannot be reached.
+    pub async fn connect(settings: &demarcate_connection::PoolSettings) -> Result<Self, ConnectError> {
+        let mut options = sea_orm::ConnectOptions::new(settings.url().to_owned());
+        if let Some(max_connections) = settings.get_max_connections() {
+            options.max_connections(max_connections);
+        }
+        if let Some(min_connections) = settings.get_min_connections() {
+            options.min_connections(min_connections);
+        }
+        if let Some(acquire_timeout) = settings.get_acquire_timeout() {
+            options.acquire_timeout(acquire_timeout);
+        }
+        if let Some(idle_timeout) = settings.get_idle_timeout() {
+            options.idle_timeout(idle_timeout);
+        }
+        match sea_orm::Database::connect(options).await {
+            Ok(connection) => Ok(Self::new(connection)),
+            Err(error) => Err(ConnectError::new(&error, settings.url())),
+        }
     }
 
     /// Returns a connection that refuses to run a query outside a transaction.
@@ -397,7 +460,8 @@ pub type SeaOrmTransactionManager = TransactionManager<SeaOrmTransactionDriver>;
 
 /// Creates a transaction manager for the given connection, with nested transactions allowed.
 ///
-/// Register it once at startup:
+/// The `install` function of this module in the `demarcate` crate creates and registers it in
+/// one call. Call this function to register the manager yourself:
 /// `demarcate::registry().set_default(Arc::new(manager(database.clone())))`.
 pub fn manager(database: TransactionalDatabase) -> SeaOrmTransactionManager {
     demarcate_connection::manager(database.source)

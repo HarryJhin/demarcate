@@ -34,12 +34,23 @@
 //!
 //! # Setup
 //!
-//! Enable the `sqlx-postgres` feature and register a transaction manager once at startup:
+//! Enable the feature of your connection library, such as `sqlx-postgres`, and install the
+//! transaction manager once at startup. The module of the driver has the functions:
 //!
 //! ```ignore
-//! let pool = demarcate::postgres::TransactionalPool::new(pg_pool);
-//! demarcate::registry().set_default(std::sync::Arc::new(demarcate::postgres::manager(pool.clone())));
+//! // Reads DATABASE_URL, connects the pool, creates the manager and registers it.
+//! let pool = demarcate::postgres::install_from_env().await?;
+//!
+//! // Or with a pool that you built yourself.
+//! let pool = demarcate::postgres::install(pg_pool)?;
 //! ```
+//!
+//! Give the returned pool to the data access code. `install_from` takes a
+//! [`PoolSettings`](connection::PoolSettings) value instead of the environment, and `install_as`
+//! and `install_from_as` install the manager of a second database under a name for
+//! `#[transactional(transaction_manager = "name")]`. The tokio-postgres and diesel-async modules
+//! have `install` and `install_as` only. To do the wiring yourself, create the
+//! manager with `manager(pool)` and register it with [`registry`].
 //!
 //! The error type of a transactional function implements `From<TransactionError>`, because
 //! beginning, committing and rolling back can fail.
@@ -68,6 +79,9 @@
 
 #![warn(missing_docs)]
 
+#[macro_use]
+mod install;
+
 /// The transaction driver for libraries that run a transaction on one database connection.
 /// Implement its `ConnectionBackend` to support another connection library.
 pub use demarcate_connection as connection;
@@ -80,24 +94,68 @@ pub use demarcate_interceptor::{
 #[doc(hidden)]
 pub use demarcate_interceptor::{TransactionalReturn, assert_transactional_return};
 pub use demarcate_macros::transactional;
+pub use install::{InstallError, SetupError};
 
 /// The diesel-async drivers and the transaction-aware pools, on deadpool, for PostgreSQL, MySQL
 /// and MariaDB.
 #[cfg(any(feature = "diesel-async-postgres", feature = "diesel-async-mysql"))]
-pub use demarcate_diesel_async as diesel_async;
+pub mod diesel_async {
+    pub use demarcate_diesel_async::*;
+
+    /// The driver for PostgreSQL: `AsyncPgConnection`.
+    #[cfg(feature = "diesel-async-postgres")]
+    pub mod postgres {
+        pub use demarcate_diesel_async::postgres::*;
+
+        install_functions! { pool: TransactionalPool, what: "a diesel-async deadpool `Pool`" }
+    }
+
+    /// The driver for MySQL and MariaDB: `AsyncMysqlConnection`.
+    #[cfg(feature = "diesel-async-mysql")]
+    pub mod mysql {
+        pub use demarcate_diesel_async::mysql::*;
+
+        install_functions! { pool: TransactionalPool, what: "a diesel-async deadpool `Pool`" }
+    }
+}
+
 /// The SeaORM driver and the transaction-aware connection, for PostgreSQL, MySQL, MariaDB and
 /// SQLite.
 #[cfg(feature = "sea-orm")]
-pub use demarcate_sea_orm as sea_orm;
+pub mod sea_orm {
+    pub use demarcate_sea_orm::*;
+
+    install_functions! { pool: TransactionalDatabase, what: "a SeaORM `DatabaseConnection`", connect: ConnectError }
+}
+
 /// The MySQL and MariaDB driver and the transaction-aware pool, through sqlx.
 #[cfg(feature = "sqlx-mysql")]
-pub use demarcate_sqlx::mysql;
+pub mod mysql {
+    pub use demarcate_sqlx::mysql::*;
+
+    install_functions! { pool: TransactionalPool, what: "a sqlx `MySqlPool`", connect: ConnectError }
+}
+
 /// The PostgreSQL driver and the transaction-aware pool, through sqlx.
 #[cfg(feature = "sqlx-postgres")]
-pub use demarcate_sqlx::postgres;
+pub mod postgres {
+    pub use demarcate_sqlx::postgres::*;
+
+    install_functions! { pool: TransactionalPool, what: "a sqlx `PgPool`", connect: ConnectError }
+}
+
 /// The SQLite driver and the transaction-aware pool, through sqlx.
 #[cfg(feature = "sqlx-sqlite")]
-pub use demarcate_sqlx::sqlite;
+pub mod sqlite {
+    pub use demarcate_sqlx::sqlite::*;
+
+    install_functions! { pool: TransactionalPool, what: "a sqlx `SqlitePool`", connect: ConnectError }
+}
+
 /// The tokio-postgres driver and the transaction-aware pool, on deadpool-postgres.
 #[cfg(feature = "tokio-postgres")]
-pub use demarcate_tokio_postgres as tokio_postgres;
+pub mod tokio_postgres {
+    pub use demarcate_tokio_postgres::*;
+
+    install_functions! { pool: TransactionalPool, what: "a deadpool-postgres `Pool`" }
+}

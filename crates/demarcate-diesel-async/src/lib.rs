@@ -262,6 +262,12 @@ macro_rules! diesel_driver {
             }
         }
 
+        impl From<Pool<$connection>> for TransactionalPool {
+            fn from(pool: Pool<$connection>) -> Self {
+                Self::new(pool)
+            }
+        }
+
         impl fmt::Debug for TransactionalPool {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.debug_struct("TransactionalPool")
@@ -368,7 +374,8 @@ macro_rules! diesel_driver {
 
         /// Creates a transaction manager for the given pool, with nested transactions allowed.
         ///
-        /// Register it once at startup:
+        /// The `install` function of this module in the `demarcate` crate creates and registers it in
+        /// one call. Call this function to register the manager yourself:
         /// `demarcate::registry().set_default(Arc::new(manager(pool.clone())))`.
         pub fn manager(pool: TransactionalPool) -> DieselTransactionManager {
             demarcate_connection::manager(pool.source)

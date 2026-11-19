@@ -159,6 +159,31 @@ macro_rules! sqlx_driver {
                 Self { source: demarcate_connection::ConnectionSource::new($backend { pool }) }
             }
 
+            /// Connects a sqlx pool with the given settings and wraps it.
+            ///
+            /// A setting that is not given keeps the default of sqlx. The transaction timeout of the
+            /// settings belongs to the transaction manager and is not used here.
+            ///
+            /// # Errors
+            ///
+            /// Returns the error of sqlx when the URL is not valid or the database cannot be reached.
+            pub async fn connect(settings: &demarcate_connection::PoolSettings) -> Result<Self, sqlx::Error> {
+                let mut options = sqlx::pool::PoolOptions::<$database>::new();
+                if let Some(max_connections) = settings.get_max_connections() {
+                    options = options.max_connections(max_connections);
+                }
+                if let Some(min_connections) = settings.get_min_connections() {
+                    options = options.min_connections(min_connections);
+                }
+                if let Some(acquire_timeout) = settings.get_acquire_timeout() {
+                    options = options.acquire_timeout(acquire_timeout);
+                }
+                if let Some(idle_timeout) = settings.get_idle_timeout() {
+                    options = options.idle_timeout(idle_timeout);
+                }
+                options.connect(settings.url()).await.map(Self::new)
+            }
+
             /// Returns a pool that refuses to run a query outside a transaction.
             ///
             /// Give this pool to a repository whose functions must always run inside a transaction. A call
@@ -220,6 +245,15 @@ macro_rules! sqlx_driver {
             /// pool requires a transaction and none is running.
             pub async fn acquire(&self) -> Result<TransactionalConnection, demarcate_core::TransactionError> {
                 self.source.acquire().await.map(TransactionalConnection)
+            }
+        }
+
+        /// The error of [`TransactionalPool::connect`].
+        pub type ConnectError = sqlx::Error;
+
+        impl From<$pool> for TransactionalPool {
+            fn from(pool: $pool) -> Self {
+                Self::new(pool)
             }
         }
 
@@ -353,7 +387,8 @@ macro_rules! sqlx_driver {
 
         /// Creates a transaction manager for the given pool, with nested transactions allowed.
         ///
-        /// Register it once at startup:
+        /// The `install` function of this module in the `demarcate` crate creates and registers it in
+        /// one call. Call this function to register the manager yourself:
         /// `demarcate::registry().set_default(Arc::new(manager(pool.clone())))`.
         pub fn manager(pool: TransactionalPool) -> $manager {
             demarcate_connection::manager(pool.source)

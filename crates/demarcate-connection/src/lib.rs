@@ -15,9 +15,11 @@
 mod backend;
 mod driver;
 mod holder;
+mod settings;
 mod source;
 
 pub use backend::ConnectionBackend;
 pub use driver::{ConnectionDriver, ConnectionTransactionObject, manager, manager_with_settings};
 pub use holder::ConnectionHolder;
+pub use settings::{PoolSettings, SettingsError, default_manager_settings};
 pub use source::{CONNECTION_SYNCHRONIZATION_ORDER, ConnectionHandle, ConnectionSource};

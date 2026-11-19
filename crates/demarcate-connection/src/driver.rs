@@ -324,7 +324,7 @@ impl<B: ConnectionBackend> TransactionDriver for ConnectionDriver<B> {
 
 /// Creates a transaction manager for the given source, with nested transactions allowed.
 pub fn manager<B: ConnectionBackend>(source: ConnectionSource<B>) -> TransactionManager<ConnectionDriver<B>> {
-    manager_with_settings(source, ManagerSettings { nested_transaction_allowed: true, ..ManagerSettings::default() })
+    manager_with_settings(source, crate::default_manager_settings())
 }
 
 /// Creates a transaction manager for the given source with the given settings.

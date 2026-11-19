@@ -44,6 +44,10 @@ DATABASE_URL=postgres://postgres:orders@localhost/postgres \
   cargo run --manifest-path examples/axum-orders/Cargo.toml
 ```
 
+The pool has 20 connections, and the server handles 10 requests at a
+time. Set `DATABASE_MAX_CONNECTIONS` for another size, 2 or more; the
+limit of requests is half of it.
+
 The server runs the migrations on start. They create the tables, two
 products (`BOOK`, `PEN`) and one coupon (`WELCOME`).
 
@@ -83,13 +87,15 @@ demarcate is not on crates.io yet. Replace the dependency in `Cargo.toml`
 with a release tag of the repository:
 
 ```toml
-demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.2.0", features = ["sqlx-postgres"] }
+demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.2.1", features = ["sqlx-postgres"] }
 ```
 
 When you copy this structure:
 
-- Register the transaction manager once at startup, before the first
-  request. The registry is global to the process.
+- Install the transaction manager once at startup, before the first
+  request: `demarcate::postgres::install_from` in `src/main.rs` connects
+  the pool with the settings from the environment and registers the
+  manager. The registry is global to the process.
 - A `RequiresNew` function takes a second connection while its caller keeps
   the first. Keep the number of concurrent requests at or below half the
   pool size, as `src/main.rs` does. Otherwise a request fails when the pool

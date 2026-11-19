@@ -29,7 +29,7 @@ struct TestApp {
     notifier: Notifier,
 }
 
-// The transaction manager is registered once per process, so the tests share one application
+// The transaction manager is installed once per process, so the tests share one application
 // and one runtime, and each test works on products, coupons and customers of its own.
 static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| Runtime::new().expect("runtime"));
 static APP: OnceCell<TestApp> = OnceCell::const_new();
@@ -41,7 +41,7 @@ async fn test_app() -> &'static TestApp {
         let pg_pool = PgPoolOptions::new().max_connections(20).connect(&url).await.expect("connect");
         demarcate_example_axum_orders::migrate(&pg_pool).await.expect("migrations");
         let notifier = Notifier::new();
-        let pool = demarcate_example_axum_orders::transactional_pool(pg_pool.clone());
+        let pool = demarcate::postgres::install(pg_pool.clone()).expect("install");
         let orders = demarcate_example_axum_orders::order_service(&pool, notifier.clone());
         let router = demarcate_example_axum_orders::http::router(orders.clone());
         TestApp { router, orders, pool, pg_pool, notifier }
