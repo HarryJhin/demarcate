@@ -8,6 +8,16 @@ All crates of the workspace share one version.
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/HarryJhin/demarcate/compare/v0.2.0...v0.2.1) - 2026-11-19
+
+### Added
+
+- install the transaction manager in one call ([#9](https://github.com/HarryJhin/demarcate/pull/9))
+
+### Fixed
+
+- build the examples against any version of the workspace ([#7](https://github.com/HarryJhin/demarcate/pull/7))
+
 ## [0.2.0](https://github.com/HarryJhin/demarcate/compare/v0.1.0...v0.2.0) - 2026-11-18
 
 ### Added
