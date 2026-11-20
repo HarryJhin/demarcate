@@ -10,6 +10,9 @@ description = "sqlx transaction managers for demarcate: PostgreSQL, MySQL, Maria
 keywords = ["transaction", "database", "spring", "async", "sqlx"]
 categories = ["database", "asynchronous"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = ["postgres"]
 postgres = ["driver", "sqlx/postgres"]

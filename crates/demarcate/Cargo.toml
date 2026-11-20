@@ -10,6 +10,9 @@ description = "Declarative transactions for Rust, ported from Spring: #[transact
 keywords = ["transaction", "database", "spring", "async", "sqlx"]
 categories = ["database", "asynchronous"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = []
 sqlx-postgres = ["dep:demarcate-sqlx", "demarcate-sqlx/postgres"]

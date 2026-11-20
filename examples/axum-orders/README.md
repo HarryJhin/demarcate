@@ -83,11 +83,10 @@ the database.
 
 ## In your own project
 
-demarcate is not on crates.io yet. Replace the dependency in `Cargo.toml`
-with a release tag of the repository:
+Replace the path dependency in `Cargo.toml` with a release from crates.io:
 
 ```toml
-demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.2.1", features = ["sqlx-postgres"] }
+demarcate = { version = "0.2", features = ["sqlx-postgres"] }
 ```
 
 When you copy this structure:

@@ -57,17 +57,17 @@ transaction. `audit` runs in its own transaction and commits even when
 
 ## Status
 
-Version 0.1 is the first release. The API can change before 1.0. There
-are drivers for sqlx, SeaORM, tokio-postgres and diesel-async.
+demarcate is in its 0.x releases. The API can change before 1.0, and a
+minor release (0.2 to 0.3) can contain breaking changes. There are
+drivers for sqlx, SeaORM, tokio-postgres and diesel-async.
 
 ## Setup
 
-demarcate is not on crates.io yet. Depend on a release tag of this
-repository:
+Add demarcate with the feature of your database library:
 
 ```toml
 [dependencies]
-demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.2.1", features = ["sqlx-postgres"] }
+demarcate = { version = "0.2", features = ["sqlx-postgres"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 ```
 
