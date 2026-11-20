@@ -8,6 +8,12 @@ All crates of the workspace share one version.
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/HarryJhin/demarcate/compare/v0.2.1...v0.2.2) - 2026-11-20
+
+### Other
+
+- describe the crates.io dependency and build docs.rs with all features ([#11](https://github.com/HarryJhin/demarcate/pull/11))
+
 ## [0.2.1](https://github.com/HarryJhin/demarcate/compare/v0.2.0...v0.2.1) - 2026-11-19
 
 ### Added

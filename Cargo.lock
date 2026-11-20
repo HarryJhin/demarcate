@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "deadpool-postgres",
  "demarcate",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-connection"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "demarcate-core",
  "tracing",
@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tokio",
  "tracing",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-diesel-async"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "deadpool",
  "demarcate-connection",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-interceptor"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "demarcate-core",
  "tokio",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-macros"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -435,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-sea-orm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "demarcate-connection",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-sqlx"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-stream",
  "demarcate-connection",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "demarcate-tokio-postgres"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "deadpool-postgres",
  "demarcate-connection",

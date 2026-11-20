@@ -11,7 +11,7 @@ keywords = ["transaction", "database", "spring", "async", "postgres"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
-demarcate-connection = { path = "../demarcate-connection", version = "0.2.1" }
-demarcate-core = { path = "../demarcate-core", version = "0.2.1", default-features = false }
+demarcate-connection = { path = "../demarcate-connection", version = "0.2.2" }
+demarcate-core = { path = "../demarcate-core", version = "0.2.2", default-features = false }
 deadpool-postgres = "0.14.1"
 tokio-postgres = "0.7.13"
