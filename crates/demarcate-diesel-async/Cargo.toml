@@ -10,6 +10,9 @@ description = "diesel-async transaction manager for demarcate, on a deadpool poo
 keywords = ["transaction", "database", "spring", "async", "diesel"]
 categories = ["database", "asynchronous"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = ["postgres"]
 postgres = ["diesel-async/postgres"]

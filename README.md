@@ -62,12 +62,11 @@ are drivers for sqlx, SeaORM, tokio-postgres and diesel-async.
 
 ## Setup
 
-demarcate is not on crates.io yet. Depend on a release tag of this
-repository:
+Add demarcate with the feature of your database library:
 
 ```toml
 [dependencies]
-demarcate = { git = "https://github.com/HarryJhin/demarcate", tag = "v0.2.1", features = ["sqlx-postgres"] }
+demarcate = { version = "0.2", features = ["sqlx-postgres"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 ```
 
