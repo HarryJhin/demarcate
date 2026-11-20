@@ -1,6 +1,6 @@
 [workspace]
-# Versions come from git tags. Nothing is published to crates.io.
-git_only = true
+# `release-plz release` publishes to crates.io with trusted publishing: every crate has the
+# workflow `release-plz.yml` of this repository as its trusted publisher.
 # Release only when a release pull request is merged.
 release_always = false
 dependencies_update = false
@@ -19,13 +19,6 @@ changelog_update = true
 changelog_path = "./CHANGELOG.md"
 changelog_include = ["demarcate-connection", "demarcate-core", "demarcate-diesel-async", "demarcate-interceptor", "demarcate-macros", "demarcate-sea-orm", "demarcate-sqlx", "demarcate-tokio-postgres"]
 
-# release-plz reads every package from the commit of its latest release tag, and fails when the
-# package does not exist there. A package that is newer than the latest tag needs an entry of
-# its own with a tag name that matches no tag, so release-plz treats it as an initial release:
-#
-#   [[package]]
-#   name = "demarcate-new"
-#   git_tag_name = "demarcate-new-v{{ version }}"
-#
-# After the first release that contains the package, delete the entry and add the package to
-# `changelog_include`.
+# crates.io accepts trusted publishing only for a crate that exists. Publish the first version
+# of a new crate with `cargo publish` and an API token, then add the trusted publisher in the
+# settings of the crate on crates.io, and add the crate to `changelog_include`.
