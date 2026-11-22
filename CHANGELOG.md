@@ -8,6 +8,12 @@ All crates of the workspace share one version.
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/HarryJhin/demarcate/compare/v0.2.2...v0.2.3) - 2026-11-22
+
+### Other
+
+- reduce transaction allocations ([#14](https://github.com/HarryJhin/demarcate/pull/14))
+
 ### Changed
 
 - Reduce redundant future boxing around transactional calls while keeping

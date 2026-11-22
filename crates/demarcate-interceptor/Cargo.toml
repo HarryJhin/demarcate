@@ -11,7 +11,7 @@ keywords = ["transaction", "database", "spring", "async", "sqlx"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
-demarcate-core = { path = "../demarcate-core", version = "0.2.2" }
+demarcate-core = { path = "../demarcate-core", version = "0.2.3" }
 tracing = { workspace = true }
 
 [dev-dependencies]
