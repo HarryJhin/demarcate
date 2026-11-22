@@ -19,8 +19,8 @@ postgres = ["diesel-async/postgres"]
 mysql = ["diesel-async/mysql"]
 
 [dependencies]
-demarcate-connection = { path = "../demarcate-connection", version = "0.2.2" }
-demarcate-core = { path = "../demarcate-core", version = "0.2.2", default-features = false }
+demarcate-connection = { path = "../demarcate-connection", version = "0.2.3" }
+demarcate-core = { path = "../demarcate-core", version = "0.2.3", default-features = false }
 deadpool = { version = "0.13.0", default-features = false, features = ["managed"] }
 diesel = { version = "2.4.0", default-features = false }
 diesel-async = { version = "0.10.0", default-features = false, features = ["deadpool"] }

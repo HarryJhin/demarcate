@@ -29,8 +29,8 @@ driver = [
 ]
 
 [dependencies]
-demarcate-connection = { path = "../demarcate-connection", version = "0.2.2", optional = true }
-demarcate-core = { path = "../demarcate-core", version = "0.2.2", optional = true }
+demarcate-connection = { path = "../demarcate-connection", version = "0.2.3", optional = true }
+demarcate-core = { path = "../demarcate-core", version = "0.2.3", optional = true }
 async-stream = { version = "0.3.6", optional = true }
 futures-core = { version = "0.3.32", optional = true }
 futures-util = { version = "0.3.32", default-features = false, features = ["alloc"], optional = true }

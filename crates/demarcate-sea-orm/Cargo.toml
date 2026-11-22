@@ -11,8 +11,8 @@ keywords = ["transaction", "database", "spring", "async", "sea-orm"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
-demarcate-connection = { path = "../demarcate-connection", version = "0.2.2" }
-demarcate-core = { path = "../demarcate-core", version = "0.2.2", default-features = false }
+demarcate-connection = { path = "../demarcate-connection", version = "0.2.3" }
+demarcate-core = { path = "../demarcate-core", version = "0.2.3", default-features = false }
 async-trait = "0.1.80"
 tokio = { workspace = true }
 sea-orm = { version = "2.0.4", default-features = false, features = ["sqlx-dep"] }
