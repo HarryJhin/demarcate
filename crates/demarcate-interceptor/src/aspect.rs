@@ -98,8 +98,8 @@ where
     Fut: Future<Output = Result<T, E>>,
 {
     let invocation = Box::pin(invocation);
-    let invoked = Box::pin(invoke(manager, attribute, function_path, invocation));
-    Box::pin(synchronization::call_scope(invoked)).await
+    let invoked = invoke(manager, attribute, function_path, invocation);
+    synchronization::call_scope(invoked).await
 }
 
 async fn invoke<T, E, Fut>(
@@ -122,7 +122,7 @@ where
     let info = Arc::new(TransactionInfo { attribute, function, status: status.clone() });
     let restore = synchronization::attach_to_call(info.clone());
 
-    let outcome = CatchUnwind::new(invocation).await;
+    let outcome = CatchUnwind::boxed(invocation).await;
 
     match outcome {
         Err(panic) => {

@@ -8,6 +8,17 @@ All crates of the workspace share one version.
 
 ## [Unreleased]
 
+### Changed
+
+- Reduce redundant future boxing around transactional calls while keeping
+  the pinning boundaries for function bodies and transaction scopes.
+- Use the identity of the existing backend `Arc` for connection resource
+  keys, so cloning a transaction-aware pool no longer allocates a key
+  string. Connection source keys now use `ResourceKey::Pointer` instead
+  of `ResourceKey::Name`, which also changes their Debug output. These
+  process-local identities are valid while the backend is alive and must
+  not be persisted or treated as stable names.
+
 ## [0.2.2](https://github.com/HarryJhin/demarcate/compare/v0.2.1...v0.2.2) - 2026-11-20
 
 ### Other
