@@ -18,7 +18,7 @@ pub trait ConnectionBackend: Send + Sync + 'static {
     /// The error type of the library.
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// A short name of the library and the database. It is the prefix of the resource key.
+    /// A short name identifying the library and the database.
     const NAME: &'static str;
 
     /// The message of the [`TransactionError::UnexpectedRollback`] that a commit returns when

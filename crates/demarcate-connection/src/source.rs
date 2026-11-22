@@ -1,7 +1,7 @@
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use demarcate_core::{
     BoundResource, BoxError, BoxFuture, CompletionStatus, ResourceHolder, ResourceKey, TransactionDefinition,
@@ -14,8 +14,6 @@ use crate::{ConnectionBackend, ConnectionHolder};
 /// The position of the synchronization that releases a connection held for a scope without a
 /// transaction. Synchronizations with a lower order run before the connection is released.
 pub const CONNECTION_SYNCHRONIZATION_ORDER: i32 = 1000;
-
-static NEXT_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Hands out the connection of the current transaction.
 ///
@@ -54,12 +52,9 @@ impl<B: ConnectionBackend> ConnectionSource<B> {
     /// Create one source for each pool and clone it. Two sources created for the same pool do not
     /// see each other's transactions.
     pub fn new(backend: B) -> Self {
-        let id = NEXT_SOURCE_ID.fetch_add(1, Ordering::SeqCst);
-        Self {
-            backend: Arc::new(backend),
-            key: ResourceKey::named(format!("{}-{id}", B::NAME)),
-            transaction_required: false,
-        }
+        let backend = Arc::new(backend);
+        let key = ResourceKey::of(&backend);
+        Self { backend, key, transaction_required: false }
     }
 
     /// Returns a source that refuses to hand out a connection outside a transaction.
@@ -82,6 +77,9 @@ impl<B: ConnectionBackend> ConnectionSource<B> {
     }
 
     /// Returns the key under which the connection of a transaction is bound to the context.
+    ///
+    /// The key identifies the shared backend of this source and its clones. It is a process-local
+    /// pointer identity, valid while the backend is alive; do not persist it or use it as a stable name.
     pub fn resource_key(&self) -> &ResourceKey {
         &self.key
     }
